@@ -1,0 +1,45 @@
+-- =============================================
+-- BANCO DE DADOS: licenses_db
+-- CONTROLE DE LICENÇA DO SISTEMA
+-- PIT II - 2025
+-- =============================================
+
+CREATE DATABASE IF NOT EXISTS licenses_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE licenses_db;
+
+-- ------------------------------------------------
+-- Tabela: licenses
+-- ------------------------------------------------
+CREATE TABLE IF NOT EXISTS licenses (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    codigo VARCHAR(36) NOT NULL UNIQUE, -- UUID
+    tipo_plano ENUM('basico', 'profissional', 'empresarial') DEFAULT 'basico',
+    max_empresas INT DEFAULT 1,
+    max_usuarios INT DEFAULT 5,
+    max_colaboradores INT DEFAULT 50,
+    data_ativacao DATETIME,
+    data_expiracao DATETIME,
+    ativa BOOLEAN DEFAULT FALSE,
+    observacoes TEXT
+);
+
+-- ------------------------------------------------
+-- Licença Padrão (válida por 1 ano a partir da ativação)
+-- ------------------------------------------------
+INSERT INTO licenses (
+    codigo, 
+    tipo_plano, 
+    max_empresas, 
+    max_usuarios, 
+    max_colaboradores,
+    data_expiracao,
+    ativa
+) VALUES (
+    'LIC-2025-001-DEV-TEST', 
+    'empresarial', 
+    10, 
+    50, 
+    500,
+    DATE_ADD(CURDATE(), INTERVAL 365 DAY),
+    TRUE
+);
