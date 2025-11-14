@@ -121,3 +121,60 @@ Danilo Hollanders de Moura
 
 Sistema desenvolvido com dedicação para gestão segura e eficiente de EPIs.
 Versão 1.2 - 14/11/2025
+
+
+INSTRUÇÕES DE INSTALAÇÃO E EXECUÇÃO
+
+Pré-requisitos
+bash- Python 3.11+
+- MySQL Server 8.0+
+- XAMPP (opcional, para banco local)
+1. Clone o repositório
+bashgit clone https://github.com/danilo-hollanders/epi-manager-system.git
+cd epi-manager-system
+2. Instale as dependências
+bashpip install PyQt5 mysql-connector-python reportlab openpyxl matplotlib pandas
+3. Configure o banco de dados
+sql-- Crie os schemas
+CREATE DATABASE epi1;
+CREATE DATABASE licenses_db;
+
+-- Importe os scripts
+mysql -u root -p epi1 < database/epi1_schema.sql
+mysql -u root -p licenses_db < database/licenses_schema.sql
+
+-- Insira a licença padrão (válida por 1 ano)
+INSERT INTO licenses_db.licenses (...) VALUES (...);
+4. Configure a conexão (config.ini)
+ini[database]
+host = localhost
+user = root
+password = 
+port = 3306
+5. Execute a aplicação
+bashpython main.py
+
+OPÇÃO 3: GERAR EXECUTÁVEL (PyInstaller)
+bashpip install pyinstaller
+pyinstaller --onefile --windowed --icon=assets/icon.ico main.py
+Executável gerado em: dist/main.exe
+
+
+PRIMEIROS PASSOS APÓS INSTALAÇÃO
+
+Ative a licença (se não estiver ativa)
+Cadastre a primeira empresa
+Crie um usuário admin
+Cadastre categorias e itens
+Cadastre colaboradores com senha
+
+
+SUPORTE E BACKUP
+
+Backup automático:backups/backup_epi_YYYYMMDD.sql
+Logs:logs/audit_YYYYMMDD.log
+Documentação completa:docs/README.md
+
+
+SISTEMA PRONTO PARA USO EM EMPRESAS REAIS
+Conformidade com NR-6 | Segurança | Auditoria | Escalabilidade
