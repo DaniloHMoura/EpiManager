@@ -130,7 +130,7 @@ bash- Python 3.11+
 - MySQL Server 8.0+
 - XAMPP (opcional, para banco local)
 1. Clone o repositório
-bashgit clone https://github.com/danilo-hollanders/epi-manager-system.git
+bashgit clone https://[https://github.com/DaniloHMoura/EpiManager](https://github.com/DaniloHMoura/EpiManager).git
 cd epi-manager-system
 2. Instale as dependências
 bashpip install PyQt5 mysql-connector-python reportlab openpyxl matplotlib pandas
