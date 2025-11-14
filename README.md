@@ -92,22 +92,32 @@ textepi_system/
 ├── export/                     # Pasta para salvar relatórios (opcional)
 └── backups/                    # Backups automáticos (futuro)
 
-Observações Importantes
-Item,Observação
-Licença,O sistema para completamente se a licença estiver inválida ou expirada.
-Senhas,Todas as senhas são armazenadas com hash SHA-256. Senhas de 4 dígitos para colaboradores.
-Níveis de Usuário,"1 = Colaborador, 2 = Almoxarife, 3 = Administrador"
-Estoque Baixo,Itens com quantidade ≤ estoque mínimo aparecem em vermelho claro na tabela.
-Validade de EPI,Definida em dias (padrão: 180). Aparece em vermelho se vencer em até 7 dias.
-Devolução,Itens devolvidos são marcados para descarte (quantidade_descarte).
-Relatórios PDF,Incluem termo de responsabilidade com campos para assinatura.
-Exportação Excel,Requer openpyxl. Exporta todo o estoque atual.
-Backup,Não implementado ainda. Recomenda-se backup manual do banco epi1.
+    Observações Importantes
+    Item,Observação
+    Licença,O sistema para completamente se a licença estiver inválida ou expirada.
+    
+    Senhas,Todas as senhas são armazenadas com hash SHA-256. Senhas de 4 dígitos para colaboradores.
+    
+    Níveis de Usuário,"1 = Colaborador, 2 = Almoxarife, 3 = Administrador"
+    
+    Estoque Baixo,Itens com quantidade ≤ estoque mínimo aparecem em vermelho claro na tabela.
+    
+    Validade de EPI,Definida em dias (padrão: 180). Aparece em vermelho se vencer em até 7 dias.
+    
+    Devolução,Itens devolvidos são marcados para descarte (quantidade_descarte).
+    
+    Relatórios PDF,Incluem termo de responsabilidade com campos para assinatura.
+    
+    Exportação Excel,Requer openpyxl. Exporta todo o estoque atual.
+    
+    Backup,Não implementado ainda. Recomenda-se backup manual do banco epi1.
 
 Dicas de Segurança
 
 Altere a senha do usuário admin após o primeiro login.
+
 Restrinja acesso ao banco MySQL apenas ao usuário root com senha forte.
+
 Não compartilhe a chave de licença.
 
 
@@ -115,11 +125,15 @@ Contribuição
 Sinta-se à vontade para abrir issues ou pull requests no repositório.
 
 Desenvolvedor
+
 Danilo Hollanders de Moura
+
 📧 danilo.aax@gmail.com
+
 📞 (34) 99209-1807
 
 Sistema desenvolvido com dedicação para gestão segura e eficiente de EPIs.
+
 Versão 1.2 - 14/11/2025
 
 
