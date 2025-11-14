@@ -74,7 +74,7 @@ Como Executar
 Salve o código em um arquivo, por exemplo: epi_manager.py
 Execute:
 
-bashpython epi_manager.py
+python epi_manager.py
 
 Na tela de login:
 Usuário padrão: admin
@@ -126,14 +126,14 @@ Versão 1.2 - 14/11/2025
 INSTRUÇÕES DE INSTALAÇÃO E EXECUÇÃO
 
 Pré-requisitos
-bash- Python 3.11+
+Python 3.11+
 - MySQL Server 8.0+
 - XAMPP (opcional, para banco local)
 1. Clone o repositório
-bashgit clone https://[https://github.com/DaniloHMoura/EpiManager](https://github.com/DaniloHMoura/EpiManager).git
+git clone https://[https://github.com/DaniloHMoura/EpiManager](https://github.com/DaniloHMoura/EpiManager).git
 cd epi-manager-system
 2. Instale as dependências
-bashpip install PyQt5 mysql-connector-python reportlab openpyxl matplotlib pandas
+pip install PyQt5 mysql-connector-python reportlab openpyxl matplotlib pandas
 3. Configure o banco de dados
 sql-- Crie os schemas
 CREATE DATABASE epi1;
@@ -152,10 +152,10 @@ user = root
 password = 
 port = 3306
 5. Execute a aplicação
-bashpython main.py
+python main.py
 
 OPÇÃO 3: GERAR EXECUTÁVEL (PyInstaller)
-bashpip install pyinstaller
+pip install pyinstaller
 pyinstaller --onefile --windowed --icon=assets/icon.ico main.py
 Executável gerado em: dist/main.exe
 
