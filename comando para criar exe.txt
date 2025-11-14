@@ -1,1 +1,1 @@
-python -m PyInstaller --onefile --windowed gerenciamentodeepi.py
+python -m PyInstaller --onefile --windowed EpiManager.py
