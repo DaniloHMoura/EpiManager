@@ -1,0 +1,93 @@
+1. Autenticação e Controle de Acesso
+
+Login seguro com hash SHA-256
+3 níveis de usuário:
+admin → acesso total
+gestor → relatórios, cadastros, movimentações
+colaborador → apenas retirada/devolução
+
+Bloqueio automático após 3 tentativas incorretas
+Validação de licença ao iniciar (expiração, limite de empresas/usuários)
+
+
+2. Cadastro de Empresa (com Licença)
+
+Cadastro de múltiplas empresas
+Limitação por licença (max_empresas)
+Validação de CNPJ único
+Bloqueio automático se licença expirar ou limite excedido
+
+
+3. Cadastro de Usuários e Colaboradores
+
+Usuários: vinculados à empresa, com nível de acesso
+Colaboradores: matrícula única, setor, função, senha (SHA-256)
+Busca rápida por nome/matricula
+
+
+4. Gerenciamento de Categorias e Itens (EPI)
+
+Categorias com norma técnica (ex: NR-6)
+Itens com:
+CA válido
+Estoque mínimo/alerta
+Validade do CA
+Fabricante
+
+Controle de estoque em tempo real
+
+
+5. Retirada de EPI (com Termo de Responsabilidade)
+
+Seleção do colaborador
+Busca de itens pendentes ou novos
+Validação de senha do colaborador
+Geração automática de PDF com termo de responsabilidade
+Dados do colaborador, item, CA, data, quantidade
+Assinatura digital (campo para assinatura)
+
+Atualização de estoque e status: pendente → confirmada
+
+
+6. Devolução de EPI
+
+Busca de retiradas confirmadas
+Seleção de item e quantidade
+Validação de senha do colaborador
+Atualização de estoque (entrada)
+Status alterado para devolvida
+
+
+7. Painel Gerencial (Dashboard)
+
+Gráficos em tempo real (Matplotlib):
+Itens mais retirados
+Estoque crítico (abaixo do mínimo)
+Movimentações por período
+
+Indicadores visuais (vermelho/amarelo/verde)
+
+
+8. Relatórios e Exportação
+
+PDF: termo de responsabilidade, relatórios completos
+Excel: movimentações, estoque, colaboradores
+Filtros por data, colaborador, item, status
+
+
+9. Auditoria Completa (Audit Logs)
+
+Registro de todas as ações críticas:
+Login/logout
+Cadastro/edição/exclusão
+Retirada/devolução
+
+Tabela audit_logs com: usuário, ação, tabela, ID, detalhes, timestamp
+
+
+10. Segurança e Conformidade
+
+Hash SHA-256 para senhas
+Licença com expiração automática
+Backup automático do banco (backup_epi_YYYYMMDD.sql)
+Validação de CA (formato e validade)
