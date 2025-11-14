@@ -84,6 +84,7 @@ Senha padrão: admin
 A senha é convertida em hash SHA-256. O primeiro login cria o usuário admin automaticamente.
 
 Estrutura de Pastas Recomendada
+
 textepi_system/
 │
 ├── epi_manager.py              # Código principal
