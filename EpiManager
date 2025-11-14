@@ -1,0 +1,2830 @@
+import sys
+import subprocess
+import importlib.util
+import mysql.connector
+from mysql.connector import Error
+import hashlib
+
+import os
+from datetime import datetime, timedelta
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, QHBoxLayout, 
+    QFormLayout, QGroupBox, QTableWidget, QLineEdit, QComboBox, QSpinBox, 
+    QDoubleSpinBox, QTextEdit, QPushButton, QLabel, QTabWidget, QToolBar, 
+    QAction, QFileDialog, QInputDialog, QListWidget, QMessageBox, QHeaderView, QAbstractItemView, QListWidgetItem, QTableWidgetItem, QCompleter
+)
+from PyQt5.QtCore import Qt, QRegExp
+from PyQt5.QtGui import QRegExpValidator, QColor
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import pandas as pd
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+import boto3
+from botocore.exceptions import ClientError
+
+
+def install_dependencies():
+    """Install required Python packages and handle requisitos.bat execution."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    batch_file = os.path.join(script_dir, "requisitos.bat")
+    
+    if getattr(sys, 'frozen', False):
+        if os.path.exists(batch_file):
+            try:
+                subprocess.run(batch_file, shell=True, check=True, capture_output=True, text=True)
+            except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+                print(f"Warning: Failed to execute or delete {batch_file}: {e}")
+            try:
+                os.remove(batch_file)
+            except Exception as e:
+                print(f"Warning: Failed to delete {batch_file}: {e}")
+        return
+
+    try:
+        subprocess.run(batch_file, shell=True, check=True, capture_output=True, text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+        print(f"Warning: Failed to execute {batch_file}: {e}")
+
+    required = {'PyQt5', 'pandas', 'openpyxl', 'matplotlib', 'reportlab', 'mysql-connector-python'}
+    missing = [pkg for pkg in required if not importlib.util.find_spec(pkg.lower())]
+    
+    if not missing:
+        print("All dependencies installed.")
+        return
+    
+    try:
+        python = sys.executable
+        for pkg in missing:
+            subprocess.check_call([python, '-m', 'pip', 'install', pkg])
+        print("Dependencies installed successfully.")
+    except Exception as e:
+        QMessageBox.critical(None, "Error", 
+            f"Failed to install dependencies: {e}\nInstall manually with 'pip install {' '.join(missing)}'")
+        sys.exit(1)
+
+install_dependencies()
+
+class DatabaseManager:
+    """Manage MySQL database operations for the EPI system with license verification."""
+    def __init__(self, host="127.0.0.1", user="root", password="00OOIIlIll!", database="epi1",
+                 license_host="127.0.0.1", license_user="root", license_password="00OOIIlIll!", license_database="licenses_db",
+                 license_key="your-license-key-12345"):
+        """Initialize the DatabaseManager with MySQL connection settings."""
+        self.db_config = {
+            'host': host,
+            'user': user,
+            'password': password,
+            'database': database,
+            'charset': 'utf8mb4',
+            'use_pure': True
+        }
+        self.license_config = {
+            'host': license_host,
+            'user': license_user,
+            'password': license_password,
+            'database': license_database,
+            'charset': 'utf8mb4',
+            'use_pure': True
+        }
+        self.license_key = license_key
+        # Cria um banco de dados epi se ele não existir
+        try:
+            temp_config = self.db_config.copy()
+            del temp_config['database']
+            conn = mysql.connector.connect(**temp_config)
+            cursor = conn.cursor()
+            cursor.execute("SHOW DATABASES")
+            databases = [row[0] for row in cursor.fetchall()]
+            if database not in databases:
+                cursor.execute(f"CREATE DATABASE {database}")
+                print(f"Database '{database}' created successfully")
+            else:
+                print(f"Database '{database}' already exists")
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Error as e:
+            print(f"Error creating database '{database}': {e}")
+            QMessageBox.critical(None, "Database Creation Error", f"Failed to create database '{database}': {e}")
+            sys.exit(1)
+        self.verify_license()
+        self.init_database()
+
+    def verify_license(self):
+        """Verify license key and expiration date from licenses_db."""
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.license_config)
+            cursor = conn.cursor()
+            # Buscar detalhes da licença
+            cursor.execute("""
+                SELECT level, expiration_date, max_companies, max_users
+                FROM licenses
+                WHERE license_key = %s
+            """, (self.license_key,))
+            license = cursor.fetchone()
+            if not license:
+                raise ValueError(f"License key '{self.license_key}' not found in licenses_db. Application cannot start.")
+            
+            level, expiration_date, max_companies, max_users = license
+            print(f"License Details: level={level}, expiration_date={expiration_date}, max_companies={max_companies}, max_users={max_users}")
+            
+            # Verifica a validade
+            if isinstance(expiration_date, str):
+                expiration_date = datetime.strptime(expiration_date, '%Y-%m-%d').date()
+            if expiration_date < datetime.now().date():
+                raise ValueError(f"License expired on {expiration_date}. Application cannot start.")
+            
+            # Limites de licença de loja para uso em add_empresa e add_usuario
+            self.max_companies = max_companies
+            self.max_users = max_users
+            print("License verified successfully")
+        except ValueError as e:
+            print(f"License Error: {e}")
+            QMessageBox.critical(None, "License Error", str(e))
+            sys.exit(1)
+        except Error as e:
+            print(f"Database Error in license verification: {e}")
+            QMessageBox.critical(None, "Database Error", f"License verification failed: {e}")
+            sys.exit(1)
+        finally:
+            if cursor:
+                cursor.close()
+            if conn and conn.is_connected():
+                conn.close()
+    def get_license_key(self):
+        """Retrieve the license key from the database."""
+        try:
+            result = self.db_manager.execute_query(
+                "SELECT license_key FROM licenses WHERE license_key = %s", (self.db_manager.license_key,), fetch=True
+            )
+            if result:
+                return result[0][0]
+            else:
+                return "Nenhuma licença encontrada"
+        except Exception as e:
+            self.handle_error("get_license_key", e, "Falha ao recuperar a chave de licença")
+            return "Erro ao consultar licença"
+        
+
+    def init_database(self):
+        """Initialize database tables and default data in the main epi DB."""
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.db_config)
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS empresas (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nome VARCHAR(255) UNIQUE,
+                    cnpj VARCHAR(18) UNIQUE,
+                    logadouro TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nome_usuario VARCHAR(255) UNIQUE,
+                    senha VARCHAR(255),
+                    level INT,
+                    nome_completo VARCHAR(255),
+                    matricula VARCHAR(50) UNIQUE,
+                    cpf VARCHAR(14) UNIQUE,
+                    empresa_id INT,
+                    FOREIGN KEY (empresa_id) REFERENCES empresas (id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS colaboradores (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nome_completo VARCHAR(255),
+                    matricula VARCHAR(50) UNIQUE,
+                    cpf VARCHAR(14) UNIQUE,
+                    senha VARCHAR(255),
+                    empresa_id INT,
+                    FOREIGN KEY (empresa_id) REFERENCES empresas (id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS categorias (
+                    id INT AUTO_INCREMENT PRIMARY KEY, 
+                    nome VARCHAR(255) UNIQUE, 
+                    descricao TEXT
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS itens (
+                    id INT AUTO_INCREMENT PRIMARY KEY, 
+                    nome VARCHAR(255), 
+                    categoria_id INT, 
+                    quantidade INT, 
+                    preco DECIMAL(10,2), 
+                    estoque_minimo INT, 
+                    fornecedor TEXT, 
+                    data_adicao DATETIME, 
+                    ca VARCHAR(50), 
+                    tamanho VARCHAR(50), 
+                    marca VARCHAR(255),
+                    quantidade_descarte INT,
+                    FOREIGN KEY (categoria_id) REFERENCES categorias (id)
+                )
+            """)
+                        
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS movimentacoes (
+                    id INT AUTO_INCREMENT PRIMARY KEY, 
+                    item_id INT, 
+                    alteracao_quantidade INT,
+                    data DATETIME, 
+                    motivo TEXT, 
+                    colaborador_id INT, 
+                    expiration_date DATE,
+                    FOREIGN KEY (item_id) REFERENCES itens (id),
+                    FOREIGN KEY (colaborador_id) REFERENCES usuarios (id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY, 
+                    user_id INT, 
+                    action VARCHAR(255), 
+                    details TEXT, 
+                    timestamp DATETIME,
+                    FOREIGN KEY (user_id) REFERENCES usuarios (id)
+                )
+            """)
+            # Verifica e cria indexes (compatível com MySQL 5.7)
+            cursor.execute("""
+                SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS 
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'itens' AND INDEX_NAME = 'idx_itens_nome'
+            """, (self.db_config['database'],))
+            if cursor.fetchone():
+                cursor.execute("DROP INDEX idx_itens_nome ON itens")
+            cursor.execute("CREATE INDEX idx_itens_nome ON itens(nome)")
+
+            cursor.execute("""
+                SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS 
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'itens' AND INDEX_NAME = 'idx_itens_ca'
+            """, (self.db_config['database'],))
+            if cursor.fetchone():
+                cursor.execute("DROP INDEX idx_itens_ca ON itens")
+            cursor.execute("CREATE INDEX idx_itens_ca ON itens(ca)")
+
+            cursor.execute("""
+                SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS 
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'movimentacoes' AND INDEX_NAME = 'idx_movimentacoes_data'
+            """, (self.db_config['database'],))
+            if cursor.fetchone():
+                cursor.execute("DROP INDEX idx_movimentacoes_data ON movimentacoes")
+            cursor.execute("CREATE INDEX idx_movimentacoes_data ON movimentacoes(data)")
+
+            # Inserir usuário administrador padrão
+            cursor.execute(
+                "INSERT IGNORE INTO usuarios (nome_usuario, senha, level, nome_completo, matricula, cpf, empresa_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                ('admin', hashlib.sha256('admin'.encode()).hexdigest(), 3, 'Administrador', 'ADMIN001', '000.000.000-00', None)
+            )
+            # Inserir categorias padrão
+            for cat in ["Luvas", "Óculos", "Capacete", "Botina", "Abafador", "Máscara/Respirador", "Cinto de Segurança"]:
+                cursor.execute("INSERT IGNORE INTO categorias (nome) VALUES (%s)", (cat,))
+            conn.commit()
+            print("Database tables and default data initialized successfully")
+        except Error as e:
+            print(f"Database Error: {e}")
+            QMessageBox.critical(None, "Database Error", f"Failed to initialize database: {e}")
+            sys.exit(1)
+        finally:
+            if cursor:
+                cursor.close()
+            if conn and conn.is_connected():
+                conn.close()
+
+    def execute_query(self, query, params=(), fetch=False):
+        """Execute a database query with error handling."""
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.db_config)
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            if fetch:
+                result = cursor.fetchall()
+                return result if result else []
+            else:
+                conn.commit()
+                return cursor.rowcount
+        except mysql.connector.IntegrityError as e:
+            print(f"Database Integrity Error: {e}")
+            QMessageBox.critical(None, "Integrity Error", f"Database error: {e}")
+            return None
+        except Error as e:
+            print(f"Database Error: {e}")
+            QMessageBox.critical(None, "Database Error", f"Query failed: {e}")
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+            if conn and conn.is_connected():
+                conn.close()
+
+class StyledWidget(QWidget):
+    """Base widget with consistent styling."""
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet("""
+            QWidget { background-color: #f5f5f5; font-family: 'Segoe UI'; }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { 
+                padding: 8px; border: 2px solid #ddd; border-radius: 5px; 
+                background-color: white; font-size: 14px; }
+            QLineEdit:focus, QComboBox:focus { border-color: #4CAF50; }
+            QPushButton { 
+                padding: 10px 20px; background-color: #4CAF50; color: white; 
+                border: none; border-radius: 5px; font-size: 14px; font-weight: bold; }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton:pressed { background-color: #3d8b40; }
+            QPushButton[delete=true] { background-color: #f44336; }
+            QTableWidget { 
+                gridline-color: #ddd; background-color: white; 
+                alternate-background-color: #f9f9f9; }
+            QTableWidget::item { padding: 0px; }
+            QTableWidget::item:selected { background-color: #4CAF50; color: white; }
+            QHeaderView::section { 
+                background-color: #2196F3; color: white; padding: 10px; 
+                font-weight: bold; border: none; }
+            QTabWidget::pane { border: 1px solid #ddd; background-color: white; }
+            QTabBar::tab { 
+                background-color: #e0e0e0; padding: 10px 20px; margin-right: 2px; }
+            QTabBar::tab:selected { background-color: #4CAF50; color: white; }
+            QGroupBox { 
+                font-weight: bold; border: 2px solid #ddd; border-radius: 5px; 
+                margin: 10px; padding-top: 10px; }
+            QLabel { font-size: 14px; }
+        """)
+
+class LoginDialog(QDialog, StyledWidget):
+    """Dialog for user login with matricula and password."""
+    def __init__(self, db_manager):
+        super().__init__()
+        self.db_manager = db_manager
+        self.user_id = None
+        self.user_level = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Set up the login dialog UI."""
+        self.setWindowTitle("Gerenciamento de EPI - Login")
+        self.setFixedSize(400, 300)
+        layout = QVBoxLayout()
+
+        title = QLabel("GERENCIADOR DE EPI")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #2196F3; margin: 20px;")
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("Digite sua matrícula")
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setPlaceholderText("Digite sua senha (4 dígitos)")
+        form.addRow("Matricula:", self.username)
+        form.addRow("Senha:", self.password)
+        layout.addLayout(form)
+
+        login_btn = QPushButton("Entrar")
+        login_btn.setToolTip("Fazer login no sistema")
+        login_btn.clicked.connect(self.login)
+        layout.addWidget(login_btn)
+        self.setLayout(layout)
+
+    def login(self):
+        """Authenticate user credentials."""
+        username = self.username.text()
+        password = hashlib.sha256(self.password.text().encode()).hexdigest()
+        result = self.db_manager.execute_query(
+            "SELECT id, level FROM usuarios WHERE nome_usuario=%s AND senha=%s", 
+            (username, password), fetch=True
+        )
+        if result:
+            self.user_id, self.user_level = result[0]
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Erro", "Credenciais inválidas!")
+
+class ChartWidget(FigureCanvas):
+    """Widget for displaying matplotlib charts."""
+    def __init__(self, parent=None):
+        self.figure = Figure(figsize=(8, 6), facecolor='white')
+        super().__init__(self.figure)
+        self.setParent(parent)
+
+    def plot_stock_levels(self, data):
+        """Plot stock levels as a bar chart."""
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        if data:
+            items, quantities = zip(*data)
+            colors = ['red' if q < 10 else 'orange' if q < 20 else 'green' for q in quantities]
+            ax.bar(range(len(items)), quantities, color=colors)
+            ax.set_xticks(range(len(items)))
+            ax.set_xticklabels(items, rotation=45, ha='right')
+            ax.set_ylabel('Quantidade')
+            ax.set_title('Níveis de Estoque de EPIs')
+        self.figure.tight_layout()
+        self.draw()
+
+class EPIApp(QMainWindow, StyledWidget):
+    """Main application for EPI management."""
+    def __init__(self):
+        super().__init__()
+        self.db_manager = DatabaseManager(host="127.0.0.1", user="root", password="00OOIIlIll!", database="epi1",
+    license_host="127.0.0.1", license_user="root", license_password="00OOIIlIll!", license_database="licenses_db",
+    license_key="your-license-key-12345")
+        self.db_manager = DatabaseManager()
+        self.current_user_id = None
+        self.current_user_level = None
+        self.pending_withdrawals = []
+        self.pending_returns = []
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Set up the main application UI."""
+        self.setWindowTitle("Sistema Avançado de Gerenciamento de EPI")
+        self.setGeometry(100, 100, 1200, 800)
+
+        login_dialog = LoginDialog(self.db_manager)
+        if login_dialog.exec_() != QDialog.Accepted:
+            sys.exit()
+        self.current_user_id = login_dialog.user_id
+        self.current_user_level = login_dialog.user_level
+
+        central_widget = QTabWidget()
+        self.setCentralWidget(central_widget)
+        tabs = [
+            (self.create_management_tab(), "Usuarios"),
+            (self.create_colaboradores_tab(), "Colaboradores"),
+            (self.create_dashboard(), "Painel"),
+            (self.create_items_tab(), "Itens"),
+            (self.create_withdrawal_tab(), "Retirada"),
+            (self.create_return_tab(), "Devolução"),
+            (self.create_delivered_tab(), "EPIs Entregues"),
+            (self.create_categories_tab(), "Categorias"),
+            (self.create_empresas_tab(), "Empresas"),
+            (self.create_reports_tab(), "Relatórios"),
+        ]
+        for widget, title in tabs:
+            central_widget.addTab(widget, title)
+
+        self.create_toolbar()
+        self.statusBar().showMessage("Pronto! Sistema desenvolvido por Danilo Hollanders de Moura.")
+        self.refresh_all_data()
+
+    def check_admin(self, action):
+        """Check if user has admin privileges for the given action."""
+        if self.current_user_level != 3:
+            QMessageBox.warning(self, "Erro", f"Apenas administradores podem {action}!")
+            return False
+        return True
+
+    def create_management_tab(self):
+        """Create the user management tab."""
+        if not self.check_admin("gerenciar usuários"):
+            return self.create_restricted_tab("Apenas administradores podem gerenciar usuários.")
+
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        self.users_table = QTableWidget(0, 6)
+        self.users_table.setHorizontalHeaderLabels(["ID", "Nome Completo", "Matrícula", "CPF", "Nível", "Empresa"])
+        self.users_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.users_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.users_table.setAlternatingRowColors(True)
+
+        form_group = QGroupBox("Cadastrar Usuario")
+        form_layout = QFormLayout()
+        self.user_nome_completo = QLineEdit(placeholderText="Digite o nome completo")
+        self.user_matricula = QLineEdit(placeholderText="Digite a matrícula")
+        self.user_cpf = QLineEdit(placeholderText="Digite o CPF")
+        self.user_senha = QLineEdit(placeholderText="Digite a senha (4 dígitos)")
+        self.user_senha.setEchoMode(QLineEdit.Password)
+        self.user_senha.setValidator(QRegExpValidator(QRegExp(r"\d{4}")))
+        self.user_level = QComboBox()
+        self.user_level.addItems(["Colaborador (1)", "Almoxarife (2)", "Admin (3)"])
+        self.user_empresa = QComboBox()
+        self.user_empresa.addItem("Selecionar Empresa", 0)
+
+        form_layout.addRow("Nome Completo:", self.user_nome_completo)
+        form_layout.addRow("Matrícula:", self.user_matricula)
+        form_layout.addRow("CPF:", self.user_cpf)
+        form_layout.addRow("Senha (4 dígitos):", self.user_senha)
+        form_layout.addRow("Nível:", self.user_level)
+        form_layout.addRow("Empresa:", self.user_empresa)
+
+        btn_layout = QHBoxLayout()
+        add_user_btn = QPushButton("Adicionar Colaborador", toolTip="Adicionar um novo Colaborador")
+        add_user_btn.clicked.connect(self.add_user)
+        delete_user_btn = QPushButton("Deletar Colaborador", toolTip="Deletar o Colaborador selecionado")
+        delete_user_btn.setProperty("delete", True)
+        delete_user_btn.clicked.connect(self.delete_user)
+        btn_layout.addWidget(add_user_btn)
+        btn_layout.addWidget(delete_user_btn)
+        form_layout.addRow(btn_layout)
+        form_group.setLayout(form_layout)
+
+        layout.addWidget(self.users_table)
+        layout.addWidget(form_group)
+        widget.setLayout(layout)
+        return widget
+
+    def create_colaboradores_tab(self):
+        """Create the collaborators management tab."""
+        if not self.check_admin("gerenciar colaboradores"):
+            return self.create_restricted_tab("Apenas administradores podem gerenciar colaboradores.")
+
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        self.colaboradores_table = QTableWidget(0, 5)
+        self.colaboradores_table.setHorizontalHeaderLabels(["ID", "Nome Completo", "Matrícula", "CPF", "Empresa"])
+        self.colaboradores_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.colaboradores_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.colaboradores_table.setAlternatingRowColors(True)
+        self.colaboradores_table.itemSelectionChanged.connect(self.load_colaborador_details)
+
+        form_group = QGroupBox("Cadastrar Colaborador")
+        form_layout = QFormLayout()
+        self.colaborador_nome_completo = QLineEdit(placeholderText="Digite o nome completo")
+        self.colaborador_matricula = QLineEdit(placeholderText="Digite a matrícula")
+        self.colaborador_cpf = QLineEdit(placeholderText="Digite o CPF")
+        self.colaborador_senha = QLineEdit(placeholderText="Digite a senha (4 dígitos)")
+        self.colaborador_senha.setEchoMode(QLineEdit.Password)
+        self.colaborador_senha.setValidator(QRegExpValidator(QRegExp(r"\d{4}")))
+        self.colaborador_empresa = QComboBox()
+        self.colaborador_empresa.addItem("Selecionar Empresa", 0)
+        
+
+        form_layout.addRow("Nome Completo:", self.colaborador_nome_completo)
+        form_layout.addRow("Matrícula:", self.colaborador_matricula)
+        form_layout.addRow("CPF:", self.colaborador_cpf)
+        form_layout.addRow("Senha (4 dígitos):", self.colaborador_senha)
+        form_layout.addRow("Empresa:", self.colaborador_empresa)
+
+        btn_layout = QHBoxLayout()
+        add_colaborador_btn = QPushButton("Adicionar Colaborador", toolTip="Adicionar um novo colaborador")
+        add_colaborador_btn.clicked.connect(self.add_colaborador)
+        update_colaborador_btn = QPushButton("Atualizar Colaborador", toolTip="Atualizar o colaborador selecionado")
+        update_colaborador_btn.clicked.connect(self.update_colaborador)
+        delete_colaborador_btn = QPushButton("Deletar Colaborador", toolTip="Deletar o colaborador selecionado")
+        delete_colaborador_btn.setProperty("delete", True)
+        delete_colaborador_btn.clicked.connect(self.delete_colaborador)
+        btn_layout.addWidget(add_colaborador_btn)
+        btn_layout.addWidget(update_colaborador_btn)
+        btn_layout.addWidget(delete_colaborador_btn)
+        form_layout.addRow(btn_layout)
+        form_group.setLayout(form_layout)
+
+        layout.addWidget(self.colaboradores_table)
+        layout.addWidget(form_group)
+        widget.setLayout(layout)
+        return widget
+
+    def create_restricted_tab(self, message):
+        """Create a tab for restricted access."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(message))
+        widget.setLayout(layout)
+        return widget
+    
+    
+    def create_dashboard(self):
+        """Create the dashboard tab with statistics and chart."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        
+        self.chart_widget = ChartWidget()
+        items = self.db_manager.execute_query(
+            "SELECT nome, quantidade FROM itens WHERE quantidade > 0 ORDER BY quantidade DESC LIMIT 10", 
+            fetch=True
+        )
+        self.chart_widget.plot_stock_levels(items or [])
+        layout.addWidget(self.chart_widget)
+        widget.setLayout(layout)
+        return widget
+    
+    def create_stat_card(self, title, value, color):
+        """Create a styled stat card for dashboard."""
+        card = QGroupBox()
+        card.setFixedHeight(120)
+        card.setStyleSheet(f"QGroupBox {{ border: 3px solid {color}; border-radius: 10px; }}")
+        layout = QVBoxLayout()
+        title_label = QLabel(title)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 14px; color: #666;")
+        value_label = QLabel(value)
+        value_label.setAlignment(Qt.AlignCenter)
+        value_label.setStyleSheet(f"font-size: 32px; font-weight: bold; color: {color};")
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        card.setLayout(layout)
+        return card
+
+    def update_dashboard(self):
+        """Update the dashboard with the latest statistics and chart."""
+        # Limpar widget do painel existentes
+        dashboard_tab = self.centralWidget().widget(2)  # Supondo que o painel seja a segunda aba
+        layout = dashboard_tab.layout()
+        
+        # Limpar cartões de estatísticas e gráficos existentes
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Recriar layout de estatísticas
+        stats_layout = QHBoxLayout()
+        total_items = len(self.db_manager.execute_query("SELECT * FROM itens", fetch=True) or [])
+        stats_layout.addWidget(self.create_stat_card("Total de EPIs", str(total_items), "#2196F3"))
+        low_stock = len(self.db_manager.execute_query(
+            "SELECT * FROM itens WHERE quantidade <= estoque_minimo", fetch=True) or [])
+        stats_layout.addWidget(self.create_stat_card("Estoque Baixo", str(low_stock), "#f44336"))
+        total_categories = len(self.db_manager.execute_query("SELECT * FROM categorias", fetch=True) or [])
+        stats_layout.addWidget(self.create_stat_card("Categorias", str(total_categories), "#4CAF50"))
+
+        # Update chart
+        self.chart_widget = ChartWidget()
+        items = self.db_manager.execute_query(
+            "SELECT nome, quantidade FROM itens WHERE quantidade > 0 ORDER BY quantidade DESC LIMIT 10", 
+            fetch=True
+        )
+        self.chart_widget.plot_stock_levels(items or [])
+
+        # Rebuild layout
+        layout.addLayout(stats_layout)
+        layout.addWidget(self.chart_widget)
+
+    
+
+    def create_items_tab(self):
+        """Create the items management tab."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        search_layout = QHBoxLayout()
+        self.search_input = QLineEdit(placeholderText="Pesquisar EPIs por nome ou CA...")
+        self.search_input.textChanged.connect(self.filter_items)
+        self.category_filter = QComboBox()
+        self.category_filter.addItem("Todas as Categorias")
+        self.category_filter.currentTextChanged.connect(self.filter_items)
+        search_layout.addWidget(QLabel("Pesquisar:"))
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(QLabel("Categoria:"))
+        search_layout.addWidget(self.category_filter)
+
+        self.items_table = QTableWidget(0, 11)
+        self.items_table.setHorizontalHeaderLabels([
+            "ID", "Nome", "CA", "Tamanho", "Marca", "Categoria", "Quantidade", 
+            "Preço", "Estoque Mínimo", "Fornecedor", "Data de Adição"
+        ])
+        self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.items_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.items_table.setAlternatingRowColors(True)
+        self.items_table.itemSelectionChanged.connect(self.load_item_details)
+
+        form_group = QGroupBox("Adicionar/Editar EPI")
+        form_layout = QFormLayout()
+        self.item_name = QLineEdit(placeholderText="Digite o nome do EPI...")
+        self.item_ca = QLineEdit()
+        self.item_size = QLineEdit()
+        self.item_brand = QLineEdit()
+        self.item_category = QComboBox()
+        self.item_quantity = QSpinBox(maximum=999999)
+        self.item_price = QDoubleSpinBox(maximum=999999.99, decimals=2)
+        self.item_min_stock = QSpinBox(maximum=999999)
+        self.item_supplier = QLineEdit()
+
+        form_layout.addRow("Nome:", self.item_name)
+        form_layout.addRow("CA:", self.item_ca)
+        form_layout.addRow("Tamanho:", self.item_size)
+        form_layout.addRow("Marca:", self.item_brand)
+        form_layout.addRow("Categoria:", self.item_category)
+        form_layout.addRow("Quantidade:", self.item_quantity)
+        form_layout.addRow("Preço:", self.item_price)
+        form_layout.addRow("Estoque Mínimo:", self.item_min_stock)
+        form_layout.addRow("Fornecedor:", self.item_supplier)
+
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Adicionar EPI", toolTip="Adicionar um novo EPI ao estoque")
+        add_btn.clicked.connect(self.add_item)
+        update_btn = QPushButton("Atualizar EPI", toolTip="Atualizar o EPI selecionado")
+        update_btn.clicked.connect(self.update_item)
+        delete_btn = QPushButton("Deletar EPI", toolTip="Deletar o EPI selecionado")
+        delete_btn.setProperty("delete", True)
+        delete_btn.clicked.connect(self.delete_item)
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(update_btn)
+        btn_layout.addWidget(delete_btn)
+        form_layout.addRow(btn_layout)
+        form_group.setLayout(form_layout)
+
+        layout.addLayout(search_layout)
+        layout.addWidget(self.items_table)
+        layout.addWidget(form_group)
+        widget.setLayout(layout)
+        return widget
+
+    def create_withdrawal_tab(self):
+        """Create the withdrawal tab for EPI distribution."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        mov_group = QGroupBox("Retirada de EPI")
+        mov_layout = QFormLayout()
+
+        self.colaborador_combo = QComboBox()
+        self.colaborador_combo.currentIndexChanged.connect(self.on_colaborador_selected)
+        self.mov_name = QLineEdit(placeholderText="Digite o nome do EPI ou CA...")
+        self.mov_name.textChanged.connect(self.on_mov_name_changed)
+        self.mov_size = QComboBox()
+        self.mov_size.currentIndexChanged.connect(self.on_mov_size_selected)
+        self.mov_ca = QLineEdit(readOnly=True)
+        self.mov_category = QComboBox(enabled=False)
+        self.mov_withdraw_qty = QSpinBox(minimum=1, maximum=999999)
+        self.mov_valid_days = QSpinBox(minimum=0, maximum=3650, value=180)
+
+        mov_layout.addRow("Colaborador:", self.colaborador_combo)
+        mov_layout.addRow("Pesquisar EPI/CA:", self.mov_name)
+        mov_layout.addRow("Tamanho:", self.mov_size)
+        mov_layout.addRow("CA:", self.mov_ca)
+        mov_layout.addRow("Categoria:", self.mov_category)
+        mov_layout.addRow("Quantidade a Retirar:", self.mov_withdraw_qty)
+        mov_layout.addRow("Validade (dias):", self.mov_valid_days)
+
+        add_to_list_btn = QPushButton("Adicionar à Lista de Retirada", 
+                                    toolTip="Adicionar o EPI selecionado à lista de retirada")
+        add_to_list_btn.clicked.connect(self.add_to_pending)
+        mov_layout.addRow(add_to_list_btn)
+
+        self.pending_table = QTableWidget(0, 5)
+        self.pending_table.setHorizontalHeaderLabels(["Nome", "CA", "Tamanho", "Quantidade", "Ação"])
+        self.pending_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        confirm_all_btn = QPushButton("Confirmar Todas as Retiradas", 
+                                    toolTip="Confirmar todas as retiradas pendentes")
+        confirm_all_btn.clicked.connect(self.confirm_pending)
+        mov_layout.addRow(self.pending_table)
+        mov_layout.addRow(confirm_all_btn)
+        mov_group.setLayout(mov_layout)
+        layout.addWidget(mov_group)
+        widget.setLayout(layout)
+        return widget
+
+    def create_return_tab(self):
+        """Create the return tab for EPI returns."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        ret_group = QGroupBox("Devolução de EPI")
+        ret_layout = QFormLayout()
+
+        self.return_colab_combo = QComboBox()
+        self.return_colab_combo.currentIndexChanged.connect(self.on_return_colab_selected)
+        ret_layout.addRow("Colaborador:", self.return_colab_combo)
+
+        self.withdrawn_table = QTableWidget(0, 6)
+        self.withdrawn_table.setHorizontalHeaderLabels(["ID", "Nome", "CA", "Tamanho", "Qnt Pendente", "Qnt a Devolver"])
+        self.withdrawn_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        ret_layout.addRow(self.withdrawn_table)
+
+        add_to_pending_btn = QPushButton("Adicionar à Lista de Devolução")
+        add_to_pending_btn.clicked.connect(self.add_returns_to_pending)
+        ret_layout.addRow(add_to_pending_btn)
+
+        self.return_pending_table = QTableWidget(0, 5)
+        self.return_pending_table.setHorizontalHeaderLabels(["Nome", "CA", "Tamanho", "Quantidade", "Ação"])
+        self.return_pending_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        ret_layout.addRow(self.return_pending_table)
+
+        confirm_returns_btn = QPushButton("Confirmar Devoluções")
+        confirm_returns_btn.clicked.connect(self.confirm_returns)
+        ret_layout.addRow(confirm_returns_btn)
+
+        ret_group.setLayout(ret_layout)
+        layout.addWidget(ret_group)
+        widget.setLayout(layout)
+        return widget
+
+    def create_delivered_tab(self):
+        """Create the delivered EPIs tab."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        filter_group = QGroupBox("Filtros")
+        filter_layout = QFormLayout()
+
+        self.delivered_colab = QComboBox()
+        self.delivered_colab.addItem("Todos", 0)
+        filter_layout.addRow("Colaborador:", self.delivered_colab)
+
+        self.delivered_start_del = QLineEdit(placeholderText="Início Entrega (AAAA-MM-DD)")
+        self.delivered_end_del = QLineEdit(placeholderText="Fim Entrega (AAAA-MM-DD)")
+        filter_layout.addRow("Início Entrega:", self.delivered_start_del)
+        filter_layout.addRow("Fim Entrega:", self.delivered_end_del)
+
+        self.delivered_start_exp = QLineEdit(placeholderText="Início Vencimento (AAAA-MM-DD)")
+        self.delivered_end_exp = QLineEdit(placeholderText="Fim Vencimento (AAAA-MM-DD)")
+        filter_layout.addRow("Início Vencimento:", self.delivered_start_exp)
+        filter_layout.addRow("Fim Vencimento:", self.delivered_end_exp)
+
+        filter_btn = QPushButton("Filtrar")
+        filter_btn.clicked.connect(self.load_delivered)
+        filter_layout.addRow(filter_btn)
+
+        filter_group.setLayout(filter_layout)
+        layout.addWidget(filter_group)
+
+        self.delivered_table = QTableWidget(0, 7)
+        self.delivered_table.setHorizontalHeaderLabels([
+            "Colaborador", "Nome EPI", "CA", "Tamanho", "Quantidade", "Data Entrega", "Data Vencimento"
+        ])
+        self.delivered_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.delivered_table)
+
+        widget.setLayout(layout)
+        return widget
+
+    def create_categories_tab(self):
+        """Create the categories management tab."""
+        widget = QWidget()
+        layout = QHBoxLayout()
+
+        self.categories_list = QListWidget()
+        self.categories_list.itemClicked.connect(self.load_category_details)
+
+        form_group = QGroupBox("Adicionar/Editar Categoria")
+        form_layout = QFormLayout()
+        self.category_name = QLineEdit()
+        self.category_description = QTextEdit(maximumHeight=100)
+        form_layout.addRow("Nome:", self.category_name)
+        form_layout.addRow("Descrição:", self.category_description)
+
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Adicionar Categoria", toolTip="Adicionar uma nova categoria")
+        add_btn.clicked.connect(self.add_category)
+        update_btn = QPushButton("Atualizar Categoria", toolTip="Atualizar a categoria selecionada")
+        update_btn.clicked.connect(self.update_category)
+        delete_btn = QPushButton("Deletar Categoria", toolTip="Deletar a categoria selecionada")
+        delete_btn.setProperty("delete", True)
+        delete_btn.clicked.connect(self.delete_category)
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(update_btn)
+        btn_layout.addWidget(delete_btn)
+        form_layout.addRow(btn_layout)
+        form_group.setLayout(form_layout)
+
+        layout.addWidget(self.categories_list)
+        layout.addWidget(form_group)
+        widget.setLayout(layout)
+        return widget
+
+    def create_empresas_tab(self):
+        """Create the companies management tab."""
+        if not self.check_admin("gerenciar empresas"):
+            return self.create_restricted_tab("Apenas administradores podem gerenciar empresas.")
+
+        widget = QWidget()
+        layout = QHBoxLayout()
+
+        self.empresas_list = QListWidget()
+        self.empresas_list.itemClicked.connect(self.load_empresa_details)
+
+        form_group = QGroupBox("Cadastrar/Editar Empresa")
+        form_layout = QFormLayout()
+        self.empresa_nome = QLineEdit(placeholderText="Digite o nome da empresa")
+        self.empresa_cnpj = QLineEdit(placeholderText="Digite o CNPJ")
+        self.empresa_logadouro = QLineEdit(placeholderText="Digite o logadouro")
+        form_layout.addRow("Nome:", self.empresa_nome)
+        form_layout.addRow("CNPJ:", self.empresa_cnpj)
+        form_layout.addRow("Logadouro:", self.empresa_logadouro)
+
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Adicionar Empresa", toolTip="Adicionar uma nova empresa")
+        add_btn.clicked.connect(self.add_empresa)
+        update_btn = QPushButton("Atualizar Empresa", toolTip="Atualizar a empresa selecionada")
+        update_btn.clicked.connect(self.update_empresa)
+        delete_btn = QPushButton("Deletar Empresa", toolTip="Deletar a empresa selecionada")
+        delete_btn.setProperty("delete", True)
+        delete_btn.clicked.connect(self.delete_empresa)
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(update_btn)
+        btn_layout.addWidget(delete_btn)
+        form_layout.addRow(btn_layout)
+        form_group.setLayout(form_layout)
+
+        layout.addWidget(self.empresas_list)
+        layout.addWidget(form_group)
+        widget.setLayout(layout)
+        self.load_empresas_list()
+        return widget
+
+    def create_reports_tab(self):
+        """Create the reports tab for generating reports and graphs."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+
+        filter_layout = QHBoxLayout()
+        self.time_filter = QComboBox()
+        self.time_filter.addItems([
+            "1 Dia", "1 Semana", "15 Dias", "1 Mês", "3 Meses", 
+            "6 Meses", "1 Ano", "5 Anos", "10 Anos", "Todos os Períodos"
+        ])
+        self.time_filter.setCurrentText("Todos os Períodos")
+        filter_layout.addWidget(QLabel("Período:"))
+        filter_layout.addWidget(self.time_filter)
+        self.collab_filter = QComboBox()
+        self.collab_filter.addItem("Selecionar Colaborador", 0)
+        filter_layout.addWidget(QLabel("Colaborador:"))
+        filter_layout.addWidget(self.collab_filter)
+        self.start_date = QLineEdit(placeholderText="Início (AAAA-MM-DD)")
+        self.end_date = QLineEdit(placeholderText="Fim (AAAA-MM-DD)")
+        filter_layout.addWidget(QLabel("Início:"))
+        filter_layout.addWidget(self.start_date)
+        filter_layout.addWidget(QLabel("Fim:"))
+        filter_layout.addWidget(self.end_date)
+        filter_layout.addStretch()
+
+        report_layout = QHBoxLayout()
+        buttons = [
+            ("Relatório de Estoque Baixo", self.generate_low_stock_report, "Gerar relatório de EPIs com estoque baixo"),
+            ("Relatório Completo de EPIs", self.generate_inventory_report, "Gerar relatório completo do estoque de EPIs"),
+            ("Relatório por Categoria", self.generate_category_report, "Gerar relatório por categoria de EPIs"),
+            ("Relatório de Retirada por Colaborador", self.generate_withdrawal_report, "Gerar relatório de EPIs retirados por colaborador"),
+            ("Relatório de Devolução por Colaborador", self.generate_return_report, "Gerar relatório de devoluções por colaborador"),
+            #("Gráfico de EPIs Mais Usados", self.show_most_used_graph, "Exibir gráfico dos EPIs mais retirados")
+        ]
+        for text, slot, tooltip in buttons:
+            btn = QPushButton(text, toolTip=tooltip)
+            btn.clicked.connect(slot)
+            report_layout.addWidget(btn)
+
+        self.report_display = QTextEdit(readOnly=True)
+        layout.addLayout(filter_layout)
+        layout.addLayout(report_layout)
+        layout.addWidget(self.report_display)
+        widget.setLayout(layout)
+        return widget
+
+    
+
+    def create_toolbar(self):
+        """Create the main toolbar with actions."""
+        toolbar = self.addToolBar("Principal")
+        actions = [
+            ("Atualizar", "Atualizar todos os dados", self.refresh_all_data),
+            ("Exportar Excel", "Exportar dados de EPIs para Excel", self.export_to_excel),
+            ("Exportar PDF", "Exportar dados de EPIs para PDF", self.export_to_pdf),
+            ("Sobre", "Exibir informações do sistema", self.show_about_dialog),  # New action
+            ("Sair", "Sair do sistema", self.logout)
+        ]
+        for i, (text, tooltip, slot) in enumerate(actions):
+            action = QAction(text, self, toolTip=tooltip)
+            action.triggered.connect(slot)
+            toolbar.addAction(action)
+            if i < len(actions) - 1:
+                toolbar.addSeparator()
+    def get_license_key(self):
+        """Retrieve the license key from the licenses_db database."""
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**self.db_manager.license_config)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT license_key FROM licenses WHERE license_key = %s", (self.db_manager.license_key,)
+            )
+            result = cursor.fetchall()
+            if result:
+                return result[0][0]
+            else:
+                return "Nenhuma licença encontrada"
+        except Exception as e:
+            self.handle_error("get_license_key", e, "Falha ao recuperar a chave de licença")
+            return "Erro ao consultar licença"
+        finally:
+            if cursor:
+                cursor.close()
+            if conn and conn.is_connected():
+                conn.close()
+    def show_about_dialog(self):
+        """Display a dialog with system information."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sobre o Sistema")
+        dialog.setFixedSize(800, 400)
+        layout = QVBoxLayout()
+        about_group = QGroupBox("Sobre o Sistema")
+        about_layout = QVBoxLayout()
+        license_key = self.get_license_key()
+        info = [
+            ("Sistema Avançado de Gerenciamento de EPI", "font-size: 20px; font-weight: bold; color: #2196F3; margin: 20px;"),
+            ("Versão: 1.2", ""),
+            ("Desenvolvedor: Danilo Hollanders de Moura", ""),
+            ("Email: danilo.aax@gmail.com", ""),
+            ("Telefone: (34) 99209-1807", ""),
+            (f"Chave de Licença do Cliente: {license_key}", "font-weight: bold;")
+        ]
+        for text, style in info:
+            label = QLabel(text)
+            label.setAlignment(Qt.AlignCenter)
+            if style:
+                label.setStyleSheet(style)
+            about_layout.addWidget(label)
+        about_layout.addStretch()
+        about_group.setLayout(about_layout)
+        layout.addWidget(about_group)
+        layout.addStretch()
+        dialog.setLayout(layout)
+        dialog.exec_()
+
+    def add_user(self):
+        """Add a new user to the system."""
+        if not self.check_admin("adicionar usuários"):
+            return
+
+        nome_completo = self.user_nome_completo.text()
+        matricula = self.user_matricula.text()
+        cpf = self.user_cpf.text()
+        senha = self.user_senha.text()
+        level = int(self.user_level.currentText().split("(")[1][0])
+        empresa_id = self.user_empresa.currentData()
+
+        if not all([nome_completo, matricula, cpf, len(senha) == 4, empresa_id]):
+            QMessageBox.warning(self, "Erro", "Preencha todos os campos! Senha deve ter 4 dígitos e Empresa deve ser selecionada.")
+            return
+
+        # Verifica o limite de usuários
+        current_users = self.db_manager.execute_query("SELECT COUNT(*) FROM usuarios", fetch=True)
+        if current_users and current_users[0][0] >= self.db_manager.max_users:
+            QMessageBox.critical(self, "Erro", f"Limite de {self.db_manager.max_users} usuários atingido!")
+            return
+
+        if not self.confirm_action(f"Adicionar usuário '{nome_completo}' (Matrícula: {matricula})?"):
+            return
+
+        try:
+            hashed_senha = hashlib.sha256(senha.encode()).hexdigest()
+            success = self.db_manager.execute_query(
+                "INSERT INTO usuarios (nome_usuario, senha, level, nome_completo, matricula, cpf, empresa_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (matricula, hashed_senha, level, nome_completo, matricula, cpf, empresa_id)
+            )
+            if success:
+                self.clear_user_form()
+                self.load_users()
+                self.load_colaboradores()
+                self.log_audit("add_user", f"Adicionou usuário '{nome_completo}' (Matrícula: {matricula}, Empresa ID: {empresa_id})")
+                QMessageBox.information(self, "Sucesso", f"Usuário '{nome_completo}' adicionado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao adicionar usuário. Verifique matrícula/CPF.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Matrícula ou CPF já existe.")
+        except Exception as e:
+            self.handle_error("add_user", e)
+
+    def delete_user(self):
+        """Delete a selected user from the system."""
+        if not self.check_admin("deletar usuários"):
+            return
+
+        current_row = self.users_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Erro", "Selecione um usuário para deletar!")
+            return
+
+        user_id = self.users_table.item(current_row, 0).text()
+        nome_completo = self.users_table.item(current_row, 1).text()
+        matricula = self.users_table.item(current_row, 2).text()
+
+        if user_id == str(self.current_user_id):
+            QMessageBox.warning(self, "Erro", "Você não pode deletar seu próprio usuário!")
+            return
+
+        if not self.confirm_action(f"Deletar usuário '{nome_completo}' (Matrícula: {matricula})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query("DELETE FROM usuarios WHERE id=%s", (user_id,))
+            if success:
+                self.load_users()
+                self.load_colaboradores()
+                self.log_audit("delete_user", f"Deletou usuário '{nome_completo}' (Matrícula: {matricula})")
+                QMessageBox.information(self, "Sucesso", f"Usuário '{nome_completo}' deletado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao deletar usuário.")
+        except Exception as e:
+            self.handle_error("delete_user", e)
+
+    def add_empresa(self):
+        """Add a new company to the system."""
+        if not self.check_admin("adicionar empresas"):
+            return
+
+        nome, cnpj, logadouro = self.empresa_nome.text(), self.empresa_cnpj.text(), self.empresa_logadouro.text()
+        if not nome or not cnpj:
+            QMessageBox.warning(self, "Erro", "Nome e CNPJ são obrigatórios!")
+            return
+
+        # Verifique o limite de empresas
+        current_companies = self.db_manager.execute_query("SELECT COUNT(*) FROM empresas", fetch=True)
+        if current_companies and current_companies[0][0] >= self.db_manager.max_companies:
+            QMessageBox.critical(self, "Erro", f"Limite de {self.db_manager.max_companies} empresas atingido!")
+            return
+
+        if not self.confirm_action(f"Adicionar empresa '{nome}' (CNPJ: {cnpj})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query(
+                "INSERT INTO empresas (nome, cnpj, logadouro) VALUES (%s, %s, %s)",
+                (nome, cnpj, logadouro or None)
+            )
+            if success:
+                self.clear_empresa_form()
+                self.load_empresas_list()
+                self.load_empresas()
+                self.log_audit("add_empresa", f"Adicionou empresa '{nome}' (CNPJ: {cnpj})")
+                QMessageBox.information(self, "Sucesso", f"Empresa '{nome}' adicionada com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao adicionar empresa.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Nome ou CNPJ já existe.")
+        except Exception as e:
+            self.handle_error("add_empresa", e)
+
+    def update_empresa(self):
+        """Update a selected company."""
+        if not self.check_admin("atualizar empresas"):
+            return
+
+        current_item = self.empresas_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "Erro", "Selecione uma empresa para atualizar!")
+            return
+
+        emp_id = current_item.data(Qt.UserRole)
+        nome, cnpj, logadouro = self.empresa_nome.text(), self.empresa_cnpj.text(), self.empresa_logadouro.text()
+        if not nome or not cnpj:
+            QMessageBox.warning(self, "Erro", "Nome e CNPJ são obrigatórios!")
+            return
+
+        if not self.confirm_action(f"Atualizar empresa '{nome}' (ID: {emp_id})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query(
+                "UPDATE empresas SET nome=%s, cnpj=%s, logadouro=%s WHERE id=%s",
+                (nome, cnpj, logadouro or None, emp_id)
+            )
+            if success:
+                self.clear_empresa_form()
+                self.load_empresas_list()
+                self.load_empresas()
+                self.log_audit("update_empresa", f"Atualizou empresa '{nome}' (ID: {emp_id})")
+                QMessageBox.information(self, "Sucesso", f"Empresa '{nome}' atualizada com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao atualizar empresa.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Nome ou CNPJ já existe.")
+        except Exception as e:
+            self.handle_error("update_empresa", e)
+
+    def delete_empresa(self):
+        """Delete a selected company."""
+        if not self.check_admin("deletar empresas"):
+            return
+
+        current_item = self.empresas_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "Erro", "Selecione uma empresa para deletar!")
+            return
+
+        emp_id = current_item.data(Qt.UserRole)
+        nome = current_item.text()
+        if not self.confirm_action(f"Deletar empresa '{nome}' (ID: {emp_id})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query("DELETE FROM empresas WHERE id=%s", (emp_id,))
+            if success:
+                self.clear_empresa_form()
+                self.load_empresas_list()
+                self.load_empresas()
+                self.log_audit("delete_empresa", f"Deletou empresa '{nome}' (ID: {emp_id})")
+                QMessageBox.information(self, "Sucesso", f"Empresa '{nome}' deletada com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao deletar empresa.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Empresa vinculada a colaboradores. Delete os colaboradores primeiro.")
+        except Exception as e:
+            self.handle_error("delete_empresa", e)
+
+    def add_item(self):
+        """Add a new EPI to the inventory or sum to existing one with same characteristics."""
+        if self.current_user_level not in [2, 3]:
+            QMessageBox.warning(self, "Erro", "Apenas almoxarifes ou administradores podem adicionar EPIs!")
+            return
+
+        item_name = self.item_name.text()
+        category_id = self.item_category.currentData()
+        if not item_name or not category_id:
+            QMessageBox.warning(self, "Erro", "Nome do EPI e categoria são obrigatórios!")
+            return
+
+        if not self.confirm_action(f"Adicionar EPI '{item_name}'?"):
+            return
+
+        try:
+            # NOVA LÓGICA: Verificar se EPI com mesmas características já existe
+            existing = self.db_manager.execute_query(
+                "SELECT id, quantidade FROM itens WHERE nome=%s AND COALESCE(ca, '')=%s AND COALESCE(tamanho, '')=%s AND COALESCE(marca, '')=%s AND categoria_id=%s",
+                (
+                    item_name,
+                    self.item_ca.text() or '',
+                    self.item_size.text() or '',
+                    self.item_brand.text() or '',
+                    category_id
+                ), fetch=True
+            )
+
+            if existing:
+                # EPI existe: Somar à quantidade existente e atualizar outros campos opcionais
+                existing_id, current_qty = existing[0]
+                new_qty = current_qty + self.item_quantity.value()
+                success = self.db_manager.execute_query(
+                    "UPDATE itens SET quantidade=%s, preco=%s, estoque_minimo=%s, fornecedor=%s WHERE id=%s",
+                    (
+                        new_qty,
+                        self.item_price.value(),
+                        self.item_min_stock.value(),
+                        self.item_supplier.text() or None,
+                        existing_id
+                    )
+                )
+                action = "atualizado (quantidade somada)"
+                log_msg = f"Somou {self.item_quantity.value()} unidades ao EPI existente '{item_name}'"
+            else:
+                # EPI não existe: Inserir novo registro (lógica original)
+                success = self.db_manager.execute_query(
+                    "INSERT INTO itens (nome, ca, tamanho, marca, categoria_id, quantidade, preco, estoque_minimo, fornecedor, data_adicao) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        item_name, self.item_ca.text() or None, self.item_size.text() or None,
+                        self.item_brand.text() or None, category_id, self.item_quantity.value(),
+                        self.item_price.value(), self.item_min_stock.value(), self.item_supplier.text() or None,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                )
+                action = "adicionado"
+                log_msg = f"Adicionou novo EPI '{item_name}'"
+
+            if success:
+                self.clear_item_form()
+                self.load_items()
+                self.update_completers()
+                self.log_audit("add_item", log_msg)
+                QMessageBox.information(self, "Sucesso", f"EPI '{item_name}' {action} com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao adicionar/atualizar EPI.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Características do EPI já existem (verifique nome/CA/tamanho/marca/categoria).")
+        except Exception as e:
+            self.handle_error("add_item", e)
+    def update_item(self):
+        """Update a selected EPI."""
+        if self.current_user_level not in [2, 3]:
+            QMessageBox.warning(self, "Erro", "Apenas almoxarifes ou administradores podem atualizar EPIs!")
+            return
+
+        current_row = self.items_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Erro", "Selecione um EPI para atualizar!")
+            return
+
+        item_id = self.items_table.item(current_row, 0).text()
+        item_name = self.item_name.text()
+        category_id = self.item_category.currentData()
+        if not item_name or not category_id:
+            QMessageBox.warning(self, "Erro", "Nome do EPI e categoria são obrigatórios!")
+            return
+
+        if not self.confirm_action(f"Atualizar EPI '{item_name}' (ID: {item_id})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query(
+                "UPDATE itens SET nome=%s, ca=%s, tamanho=%s, marca=%s, categoria_id=%s, quantidade=%s, preco=%s, estoque_minimo=%s, fornecedor=%s WHERE id=%s",
+                (
+                    item_name, self.item_ca.text() or None, self.item_size.text() or None,
+                    self.item_brand.text() or None, category_id, self.item_quantity.value(),
+                    self.item_price.value(), self.item_min_stock.value(), self.item_supplier.text() or None, item_id
+                )
+            )
+            if success:
+                self.clear_item_form()
+                self.load_items()
+                self.update_completers()
+                self.log_audit("update_item", f"Atualizou EPI '{item_name}' (ID: {item_id})")
+                QMessageBox.information(self, "Sucesso", f"EPI '{item_name}' atualizado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao atualizar EPI.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Nome do EPI ou CA já existe.")
+        except Exception as e:
+            self.handle_error("update_item", e)
+
+    def delete_item(self):
+        """Delete a selected EPI."""
+        if self.current_user_level not in [2, 3]:
+            QMessageBox.warning(self, "Erro", "Apenas almoxarifes ou administradores podem deletar EPIs!")
+            return
+
+        current_row = self.items_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Erro", "Selecione um EPI para deletar!")
+            return
+
+        item_id = self.items_table.item(current_row, 0).text()
+        item_name = self.items_table.item(current_row, 1).text()
+        if not self.confirm_action(f"Deletar EPI '{item_name}' (ID: {item_id})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query("DELETE FROM itens WHERE id=%s", (item_id,))
+            if success:
+                self.clear_item_form()
+                self.load_items()
+                self.update_completers()
+                self.log_audit("delete_item", f"Deletou EPI '{item_name}' (ID: {item_id})")
+                QMessageBox.information(self, "Sucesso", f"EPI '{item_name}' deletado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao deletar EPI.")
+        except Exception as e:
+            self.handle_error("delete_item", e)
+
+    def add_category(self):
+        """Add a new category."""
+        if not self.check_admin("adicionar categorias"):
+            return
+
+        category_name = self.category_name.text()
+        if not category_name:
+            QMessageBox.warning(self, "Erro", "O nome da categoria é obrigatório!")
+            return
+
+        if not self.confirm_action(f"Adicionar categoria '{category_name}'?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query(
+                "INSERT INTO categorias (nome, descricao) VALUES (%s, %s)",
+                (category_name, self.category_description.toPlainText())
+            )
+            if success:
+                self.clear_category_form()
+                self.load_categories()
+                self.load_items()
+                self.log_audit("add_category", f"Adicionou categoria '{category_name}'")
+                QMessageBox.information(self, "Sucesso", f"Categoria '{category_name}' adicionada com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao adicionar categoria.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Nome da categoria já existe.")
+        except Exception as e:
+            self.handle_error("add_category", e)
+
+    def update_category(self):
+        """Update a selected category."""
+        if not self.check_admin("atualizar categorias"):
+            return
+
+        current_item = self.categories_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "Erro", "Selecione uma categoria para atualizar!")
+            return
+
+        cat_id = current_item.data(Qt.UserRole)
+        category_name = self.category_name.text()
+        if not category_name:
+            QMessageBox.warning(self, "Erro", "O nome da categoria é obrigatório!")
+            return
+
+        if not self.confirm_action(f"Atualizar categoria '{category_name}' (ID: {cat_id})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query(
+                "UPDATE categorias SET nome=%s, descricao=%s WHERE id=%s",
+                (category_name, self.category_description.toPlainText(), cat_id)
+            )
+            if success:
+                self.clear_category_form()
+                self.load_categories()
+                self.load_items()
+                self.log_audit("update_category", f"Atualizou categoria '{category_name}' (ID: {cat_id})")
+                QMessageBox.information(self, "Sucesso", f"Categoria '{category_name}' atualizada com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao atualizar categoria.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Nome da categoria já existe.")
+        except Exception as e:
+            self.handle_error("update_category", e)
+
+    def delete_category(self):
+        """Delete a selected category."""
+        if not self.check_admin("deletar categorias"):
+            return
+
+        current_item = self.categories_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "Erro", "Selecione uma categoria para deletar!")
+            return
+
+        cat_id = current_item.data(Qt.UserRole)
+        category_name = current_item.text()
+        if not self.confirm_action(f"Deletar categoria '{category_name}' (ID: {cat_id})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query("DELETE FROM categorias WHERE id=%s", (cat_id,))
+            if success:
+                self.clear_category_form()
+                self.load_categories()
+                self.load_items()
+                self.log_audit("delete_category", f"Deletou categoria '{category_name}' (ID: {cat_id})")
+                QMessageBox.information(self, "Sucesso", f"Categoria '{category_name}' deletada com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao deletar categoria.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Categoria vinculada a itens. Delete os itens primeiro.")
+        except Exception as e:
+            self.handle_error("delete_category", e)
+
+    def wrap_text(self, text, canvas, max_width, font_name, font_size):
+        """Split text into lines that fit within max_width using the specified font."""
+        canvas.setFont(font_name, font_size)
+        words = text.split()
+        lines, current_line, current_width = [], [], 0
+        for word in words:
+            word_width = canvas.stringWidth(word + " ", font_name, font_size)
+            if current_width + word_width <= max_width:
+                current_line.append(word)
+                current_width += word_width
+            else:
+                lines.append(" ".join(current_line))
+                current_line, current_width = [word], word_width
+        if current_line:
+            lines.append(" ".join(current_line))
+        return lines
+
+    def generate_withdrawal_report(self):
+        """Generate a PDF report of EPI withdrawals for a collaborator."""
+        if not self.check_admin("gerar relatórios"):
+            return
+
+        colab_id = self.collab_filter.currentData()
+        if not colab_id:
+            QMessageBox.warning(self, "Erro", "Selecione um colaborador para gerar o relatório!")
+            return
+
+        try:
+            start = self.start_date.text() or None
+            end = self.end_date.text() or None
+            date_range = self.get_date_range() if not start and not end else None
+            query = """
+                SELECT c.nome_completo, i.nome, i.ca, i.tamanho, m.alteracao_quantidade, m.data, e.nome
+                FROM movimentacoes m
+                JOIN colaboradores c ON m.colaborador_id = c.id
+                JOIN itens i ON m.item_id = i.id
+                LEFT JOIN empresas e ON c.empresa_id = e.id
+                WHERE m.alteracao_quantidade < 0 AND m.colaborador_id = %s
+            """
+            params = [colab_id]
+            if start:
+                query += " AND m.data >= %s"
+                params.append(start)
+            if end:
+                query += " AND m.data <= %s"
+                params.append(end)
+            if date_range and not start and not end:
+                query += " AND m.data >= %s"
+                params.append(date_range)
+            query += " ORDER BY m.data DESC"
+            withdrawals = self.db_manager.execute_query(query, params, fetch=True)
+
+            if not withdrawals:
+                QMessageBox.warning(self, "Aviso", "Nenhum dado de retirada encontrado para o período selecionado!")
+                return
+
+            empresa_info = self.db_manager.execute_query(
+                "SELECT nome, cnpj, logadouro FROM empresas WHERE id = (SELECT empresa_id FROM colaboradores WHERE id = %s)", (colab_id,), fetch=True
+            )
+            nome_empresa = empresa_info[0][0] if empresa_info else "N/A"
+            cnpj = empresa_info[0][1] if empresa_info and empresa_info[0][1] else "N/A"
+            logadouro = empresa_info[0][2] if empresa_info and empresa_info[0][2] else "N/A"
+            nome_colaborador = withdrawals[0][0]
+
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Salvar Relatório PDF", f"relatorio_retirada_{nome_colaborador}.pdf", "Arquivos PDF (*.pdf)"
+            )
+            if not filename:
+                return
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            margin = 50
+            y_position = height - margin
+            table_width = width - 2 * margin
+
+            # Cabeçalho
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(margin, y_position, f"Termo de Responsabilidade de EPIs - {nome_colaborador}")
+            y_position -= 20
+            c.setFont("Helvetica", 12)
+            c.drawString(margin, y_position, f"Data: {datetime.now().strftime('%Y-%m-%d')}")
+            y_position -= 30
+
+            # Informações da empresa
+            c.setFont("Helvetica", 10)
+            company_text = (
+                f"Recebi da empresa {nome_empresa or 'N/A'}, inscrita no CNPJ {cnpj or 'N/A'}, localizada na {logadouro or 'N/A'}, "
+                "a título de empréstimo, para meu uso exclusivo e obrigatório nas dependências da empresa, conforme determinado na NR-6 da Portaria 3.214/78, "
+                "os equipamentos especificados neste termo de responsabilidade, comprometendo-me a mantê-los em perfeito estado de conservação, ficando ciente de que:"
+            )
+            for line in self.wrap_text(company_text, c, table_width, "Helvetica", 10):
+                if y_position < margin:
+                    c.showPage()
+                    y_position = height - margin
+                    c.setFont("Helvetica", 10)
+                c.drawString(margin, y_position, line)
+                y_position -= 15
+            y_position -= 20
+
+            # Termos
+            c.setFont("Helvetica-Oblique", 10)
+            terms = [
+                "Recebi treinamento e orientações quanto à necessidade na utilização dos referidos EPI's, a maneira correta de usá-los, guardá-los e higienizá-los, bem como da minha responsabilidade quanto a seu uso conforme determinado na NR-1 da Portaria 3.214/78.",
+                "Se o equipamento for danificado ou inutilizado por emprego inadequado, mau uso, negligência ou extravio, a empresa me fornecerá novo equipamento e cobrará o valor de um equipamento da mesma marca ou equivalente ao da peça (parágrafo único do artigo 462 da CLT).",
+                "Fico proibido de dar ou emprestar o equipamento que estiver sob minha responsabilidade, só podendo fazê-lo se receber ordem por escrito da pessoa autorizada para tal fim.",
+                "Em caso de dano, inutilização ou extravio do equipamento deverei comunicar imediatamente ao setor competente.",
+                "Terminando os serviços ou no caso de rescisão do contrato de trabalho, devolverei o equipamento completo e em perfeito estado de conservação, considerando-se o tempo do uso do mesmo, ao setor competente.",
+                "Estando os equipamentos em minha posse, estarei sujeito a inspeções sem prévio aviso.",
+                "Fico ciente de que não utilizando o equipamento de proteção individual em serviço estarei sujeito as sanções disciplinares cabíveis que irão desde simples advertências até a dispensa por justa causa nos termos do Art. 482 da C.L.T. combinado com a NR-1 e NR-6 da Portaria 3.214/78."
+            ]
+            for i, term in enumerate(terms, 1):
+                for line in self.wrap_text(f"{i}. {term}", c, table_width, "Helvetica-Oblique", 10):
+                    if y_position < margin:
+                        c.showPage()
+                        y_position = height - margin
+                        c.setFont("Helvetica-Oblique", 10)
+                    c.drawString(margin, y_position, line)
+                    y_position -= 15
+                y_position -= 5
+
+            # Assinatura e Data
+            y_position -= 30
+            c.setFont("Helvetica", 10)
+            c.drawString(margin, y_position, "Assinatura do Colaborador: _______________________________")
+            y_position -= 20
+            c.drawString(margin, y_position, f"Data: {datetime.now().strftime('%Y-%m-%d')}")
+            y_position -= 30
+
+            # Tabela de retiradas
+            headers = ["Qnt.", "Nome do EPI", "CA", "Tamanho", "Data de Retirada", "Assinatura"]
+            col_widths = [40, 150, 60, 60, 100, 100]
+            c.setFont("Helvetica-Bold", 10)
+            x_position = margin
+            for header, width in zip(headers, col_widths):
+                c.drawString(x_position, y_position, header)
+                x_position += width
+            y_position -= 20
+            c.line(margin, y_position, margin + table_width, y_position)
+            y_position -= 10
+
+            c.setFont("Helvetica", 10)
+            for nome_completo, nome, ca, tamanho, qty, data, _ in withdrawals:
+                if y_position < margin:
+                    c.showPage()
+                    y_position = height - margin
+                    c.setFont("Helvetica-Bold", 10)
+                    x_position = margin
+                    for header, width in zip(headers, col_widths):
+                        c.drawString(x_position, y_position, header)
+                        x_position += width
+                    y_position -= 20
+                    c.line(margin, y_position, margin + table_width, y_position)
+                    y_position -= 10
+                    c.setFont("Helvetica", 10)
+
+                x_position = margin
+                values = [str(-qty), nome, ca or "N/A", tamanho or "N/A", data, "________________"]
+                for value, width in zip(values, col_widths):
+                    c.drawString(x_position, y_position, str(value))
+                    x_position += width
+                y_position -= 20
+                c.line(margin, y_position, margin + table_width, y_position)
+                y_position -= 10
+
+            c.save()
+            self.log_audit("generate_withdrawal_report", f"Gerou relatório de retirada para colaborador {nome_colaborador}")
+            QMessageBox.information(self, "Sucesso", f"Relatório gerado em {filename}")
+        except Exception as e:
+            self.handle_error("generate_withdrawal_report", e, "Falha na geração do relatório")
+
+    def generate_return_report(self):
+        """Generate a PDF report of EPI returns for a collaborator."""
+        if not self.check_admin("gerar relatórios"):
+            return
+
+        colab_id = self.collab_filter.currentData()
+        if not colab_id:
+            QMessageBox.warning(self, "Erro", "Selecione um colaborador para gerar o relatório!")
+            return
+
+        try:
+            start = self.start_date.text() or None
+            end = self.end_date.text() or None
+            date_range = self.get_date_range() if not start and not end else None
+            query = """
+                SELECT c.nome_completo, i.nome, i.ca, i.tamanho, m.alteracao_quantidade, m.data, e.nome
+                FROM movimentacoes m
+                JOIN colaboradores c ON m.colaborador_id = c.id
+                JOIN itens i ON m.item_id = i.id
+                LEFT JOIN empresas e ON c.empresa_id = e.id
+                WHERE m.alteracao_quantidade > 0 AND m.colaborador_id = %s
+            """
+            params = [colab_id]
+            if start:
+                query += " AND m.data >= %s"
+                params.append(start)
+            if end:
+                query += " AND m.data <= %s"
+                params.append(end)
+            if date_range and not start and not end:
+                query += " AND m.data >= %s"
+                params.append(date_range)
+            query += " ORDER BY m.data DESC"
+            returns = self.db_manager.execute_query(query, params, fetch=True)
+
+            if not returns:
+                QMessageBox.warning(self, "Aviso", "Nenhum dado de devolução encontrado para o período selecionado!")
+                return
+
+            empresa_info = self.db_manager.execute_query(
+                "SELECT nome, cnpj, logadouro FROM empresas WHERE id = (SELECT empresa_id FROM colaboradores WHERE id = %s)", (colab_id,), fetch=True
+            )
+            nome_empresa = empresa_info[0][0] if empresa_info else "N/A"
+            cnpj = empresa_info[0][1] if empresa_info and empresa_info[0][1] else "N/A"
+            logadouro = empresa_info[0][2] if empresa_info and empresa_info[0][2] else "N/A"
+            nome_colaborador = returns[0][0]
+
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Salvar Relatório PDF", f"relatorio_devolucao_{nome_colaborador}.pdf", "Arquivos PDF (*.pdf)"
+            )
+            if not filename:
+                return
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            margin = 50
+            y_position = height - margin
+            table_width = width - 2 * margin
+
+            # Cabeçalho
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(margin, y_position, f"Termo de Devolução de EPIs - {nome_colaborador}")
+            y_position -= 20
+            c.setFont("Helvetica", 12)
+            c.drawString(margin, y_position, f"Data: {datetime.now().strftime('%Y-%m-%d')}")
+            y_position -= 30
+
+            # Informações da empresa
+            c.setFont("Helvetica", 10)
+            company_text = (
+                f"Devolvi à empresa {nome_empresa or 'N/A'}, inscrita no CNPJ {cnpj or 'N/A'}, localizada na {logadouro or 'N/A'}, "
+                "os equipamentos especificados neste termo de devolução."
+            )
+            for line in self.wrap_text(company_text, c, table_width, "Helvetica", 10):
+                if y_position < margin:
+                    c.showPage()
+                    y_position = height - margin
+                    c.setFont("Helvetica", 10)
+                c.drawString(margin, y_position, line)
+                y_position -= 15
+            y_position -= 20
+
+            # Signature and Date
+            y_position -= 30
+            c.setFont("Helvetica", 10)
+            c.drawString(margin, y_position, "Assinatura do Colaborador: _______________________________")
+            y_position -= 20
+            c.drawString(margin, y_position, f"Data: {datetime.now().strftime('%Y-%m-%d')}")
+            y_position -= 30
+
+            # Tabela de devolução
+            headers = ["Qnt.", "Nome do EPI", "CA", "Tamanho", "Data de Devolução", "Assinatura"]
+            col_widths = [40, 150, 60, 60, 100, 100]
+            c.setFont("Helvetica-Bold", 10)
+            x_position = margin
+            for header, width in zip(headers, col_widths):
+                c.drawString(x_position, y_position, header)
+                x_position += width
+            y_position -= 20
+            c.line(margin, y_position, margin + table_width, y_position)
+            y_position -= 10
+
+            c.setFont("Helvetica", 10)
+            for nome_completo, nome, ca, tamanho, qty, data, _ in returns:
+                if y_position < margin:
+                    c.showPage()
+                    y_position = height - margin
+                    c.setFont("Helvetica-Bold", 10)
+                    x_position = margin
+                    for header, width in zip(headers, col_widths):
+                        c.drawString(x_position, y_position, header)
+                        x_position += width
+                    y_position -= 20
+                    c.line(margin, y_position, margin + table_width, y_position)
+                    y_position -= 10
+                    c.setFont("Helvetica", 10)
+
+                x_position = margin
+                values = [str(qty), nome, ca or "N/A", tamanho or "N/A", data, "________________"]
+                for value, width in zip(values, col_widths):
+                    c.drawString(x_position, y_position, str(value))
+                    x_position += width
+                y_position -= 20
+                c.line(margin, y_position, margin + table_width, y_position)
+                y_position -= 10
+
+            c.save()
+            self.log_audit("generate_return_report", f"Gerou relatório de devolução para colaborador {nome_colaborador}")
+            QMessageBox.information(self, "Sucesso", f"Relatório gerado em {filename}")
+        except Exception as e:
+            self.handle_error("generate_return_report", e, "Falha na geração do relatório")
+
+    def generate_low_stock_report(self):
+        """Generate a report of low stock EPIs."""
+        if not self.check_admin("gerar relatórios"):
+            return
+
+        items = self.db_manager.execute_query(
+            "SELECT i.nome, c.nome, i.quantidade, i.estoque_minimo FROM itens i "
+            "LEFT JOIN categorias c ON i.categoria_id = c.id WHERE i.quantidade <= i.estoque_minimo "
+            "ORDER BY i.quantidade ASC", fetch=True
+        )
+        report = "RELATÓRIO DE ESTOQUE BAIXO DE EPIs\n" + "="*50 + "\n\n"
+        if items:
+            for name, category, quantity, min_stock in items:
+                report += f"EPI: {name}\nCategoria: {category or 'N/A'}\nEstoque Atual: {quantity}\nEstoque Mínimo: {min_stock}\n" + "-"*30 + "\n"
+        else:
+            report += "Nenhum EPI com estoque baixo no momento.\n"
+        self.report_display.setText(report)
+        self.log_audit("generate_report", "Gerou relatório de estoque baixo")
+
+    def generate_inventory_report(self):
+        """Generate a complete inventory report."""
+        if not self.check_admin("gerar relatórios"):
+            return
+
+        start_date = self.get_date_range()
+        items = self.db_manager.execute_query(
+            "SELECT i.nome, i.ca, i.tamanho, i.marca, c.nome, i.quantidade, i.preco, i.fornecedor "
+            "FROM itens i LEFT JOIN categorias c ON i.categoria_id = c.id ORDER BY i.nome", fetch=True
+        )
+        query = """
+            SELECT i.nome, i.ca, i.tamanho, i.marca, c.nome, m.alteracao_quantidade, m.data, i.preco
+            FROM movimentacoes m JOIN itens i ON m.item_id = i.id
+            LEFT JOIN categorias c ON i.categoria_id = c.id WHERE m.alteracao_quantidade < 0
+        """
+        params = [start_date] if start_date else []
+        if start_date:
+            query += " AND m.data >= %s"
+        withdrawals = self.db_manager.execute_query(query, params, fetch=True)
+
+        report = f"RELATÓRIO COMPLETO DE EPIs ({self.time_filter.currentText()})\n" + "="*50 + "\n\n"
+        total_value = 0
+        report += "Estoque Atual:\n" + "-"*30 + "\n"
+        if items:
+            for name, ca, size, brand, category, quantity, price, supplier in items:
+                value = quantity * price
+                total_value += value
+                report += (
+                    f"EPI: {name}\nCA: {ca or 'N/A'}\nTamanho: {size or 'N/A'}\nMarca: {brand or 'N/A'}\n"
+                    f"Categoria: {category or 'N/A'}\nQuantidade: {quantity}\nPreço: R${price:.2f}\n"
+                    f"Valor Total: R${value:.2f}\nFornecedor: {supplier or 'N/A'}\n" + "-"*30 + "\n"
+                )
+            report += f"\nVALOR TOTAL EM ESTOQUE: R${total_value:.2f}\n\n"
+        else:
+            report += "Nenhum EPI no estoque.\n\n"
+
+        report += f"Retiradas no Período ({self.time_filter.currentText()}):\n" + "-"*30 + "\n"
+        total_withdrawn_qty, total_withdrawn_value = 0, 0
+        if withdrawals:
+            for name, ca, size, brand, category, qty, date, price in withdrawals:
+                withdrawn_qty = -qty
+                withdrawn_value = withdrawn_qty * price
+                total_withdrawn_qty += withdrawn_qty
+                total_withdrawn_value += withdrawn_value
+                report += (
+                    f"EPI: {name}\nCA: {ca or 'N/A'}\nTamanho: {size or 'N/A'}\nMarca: {brand or 'N/A'}\n"
+                    f"Categoria: {category or 'N/A'}\nQuantidade Retirada: {withdrawn_qty}\n"
+                    f"Valor Retirado: R${withdrawn_value:.2f}\nData: {date}\n" + "-"*30 + "\n"
+                )
+            report += f"\nTOTAL RETIRADO: {total_withdrawn_qty} unidades, R${total_withdrawn_value:.2f}\n"
+        else:
+            report += "Nenhuma retirada no período selecionado.\n"
+
+        self.report_display.setText(report)
+        self.log_audit("generate_report", f"Gerou relatório completo ({self.time_filter.currentText()})")
+
+    def generate_category_report(self):
+        """Generate a report by EPI category."""
+        if not self.check_admin("gerar relatórios"):
+            return
+
+        start_date = self.get_date_range()
+        categories = self.db_manager.execute_query(
+            "SELECT c.nome, COUNT(i.id) as conta_itens, SUM(i.quantidade * i.preco) as valor_total "
+            "FROM categorias c LEFT JOIN itens i ON c.id = i.categoria_id "
+            "GROUP BY c.id, c.nome ORDER BY valor_total DESC", fetch=True
+        )
+        query = """
+            SELECT c.nome, SUM(-m.alteracao_quantidade * i.preco) as valor_retirado
+            FROM categorias c LEFT JOIN itens i ON c.id = i.categoria_id
+            LEFT JOIN movimentacoes m ON i.id = m.item_id WHERE m.alteracao_quantidade < 0
+        """
+        params = [start_date] if start_date else []
+        if start_date:
+            query += " AND m.data >= %s"
+        query += " GROUP BY c.id, c.nome"
+        withdrawn_values = self.db_manager.execute_query(query, params, fetch=True) or []
+        withdrawn_dict = {name: value for name, value in withdrawn_values}
+
+        report = f"RELATÓRIO POR CATEGORIA DE EPIs ({self.time_filter.currentText()})\n" + "="*50 + "\n\n"
+        if categories:
+            for name, item_count, total_value in categories:
+                withdrawn_value = withdrawn_dict.get(name, 0) or 0
+                report += (
+                    f"Categoria: {name}\nNúmero de EPIs: {item_count or 0}\n"
+                    f"Valor Total em Estoque: R${total_value or 0:.2f}\n"
+                    f"Valor Total Retirado: R${withdrawn_value:.2f}\n" + "-"*30 + "\n"
+                )
+        else:
+            report += "Nenhuma categoria encontrada.\n"
+        self.report_display.setText(report)
+        self.log_audit("generate_report", f"Gerou relatório por categoria ({self.time_filter.currentText()})")
+
+    def show_most_used_graph(self):
+        """Display a graph of the most used EPIs."""
+        if not self.check_admin("gerar gráficos"):
+            return
+
+        start_date = self.get_date_range()
+        query = """
+            SELECT i.nome || ' (' || COALESCE(i.tamanho, 'Sem tamanho') || ')', SUM(-m.alteracao_quantidade) as total_retirado
+            FROM movimentacoes m JOIN itens i ON m.item_id = i.id WHERE m.alteracao_quantidade < 0
+        """
+        params = [start_date] if start_date else []
+        if start_date:
+            query += " AND m.data >= %s"
+        query += " GROUP BY i.id, i.nome, i.tamanho ORDER BY total_retirado DESC LIMIT 10"
+        data = self.db_manager.execute_query(query, params, fetch=True)
+
+        if not data:
+            QMessageBox.information(self, "Informação", f"Nenhum dado de retirada disponível para o período: {self.time_filter.currentText()}.")
+            return
+
+        fig = Figure()
+        canvas = FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+        names, amounts = zip(*data)
+        ax.bar(range(len(names)), amounts, color='skyblue')
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=0, ha='right')
+        ax.set_ylabel('Quantidade Retirada')
+        ax.set_title(f'EPIs Mais Utilizados (Retirados) - {self.time_filter.currentText()}')
+        fig.tight_layout()
+        canvas.draw()
+
+        graph_window = QDialog(self)
+        layout = QVBoxLayout()
+        layout.addWidget(canvas)
+        graph_window.setLayout(layout)
+        graph_window.setWindowTitle(f"Gráfico de EPIs Mais Usados - {self.time_filter.currentText()}")
+        graph_window.resize(800, 600)
+        graph_window.exec_()
+        self.log_audit("show_graph", f"Exibiu gráfico de EPIs mais usados ({self.time_filter.currentText()})")
+
+    def export_to_excel(self):
+        """Export EPI data to Excel."""
+        if not self.check_admin("exportar relatórios"):
+            return
+
+        try:
+            import openpyxl
+        except ImportError:
+            QMessageBox.critical(self, "Erro", "Módulo 'openpyxl' não instalado. Instale com 'pip install openpyxl'.")
+            return
+
+        try:
+            items = self.db_manager.execute_query(
+                "SELECT i.nome, i.ca, i.tamanho, i.marca, c.nome, i.quantidade, i.preco, i.fornecedor, i.data_adicao "
+                "FROM itens i LEFT JOIN categorias c ON i.categoria_id = c.id", fetch=True
+            )
+            if not items:
+                QMessageBox.warning(self, "Aviso", "Nenhum dado para exportar!")
+                return
+
+            df = pd.DataFrame(items, columns=[
+                'Nome do EPI', 'CA', 'Tamanho', 'Marca', 'Categoria', 'Quantidade', 'Preço', 'Fornecedor', 'Data de Adição'
+            ])
+            filename, _ = QFileDialog.getSaveFileName(self, "Salvar Arquivo Excel", "exportacao_epi.xlsx", "Arquivos Excel (*.xlsx)")
+            if filename:
+                df.to_excel(filename, index=False, engine='openpyxl')
+                self.log_audit("export_excel", f"Exportou dados para Excel: {filename}")
+                QMessageBox.information(self, "Sucesso", f"Dados exportados para {filename}")
+        except Exception as e:
+            self.handle_error("export_to_excel", e, "Falha na exportação")
+
+    def export_to_pdf(self):
+        """Export EPI data to PDF."""
+        if not self.check_admin("exportar relatórios"):
+            return
+
+        try:
+            items = self.db_manager.execute_query(
+                "SELECT i.nome, i.ca, i.tamanho, i.marca, c.nome, i.quantidade, i.preco, i.fornecedor "
+                "FROM itens i LEFT JOIN categorias c ON i.categoria_id = c.id ORDER BY i.nome", fetch=True
+            )
+            if not items:
+                QMessageBox.warning(self, "Aviso", "Nenhum dado para exportar!")
+                return
+
+            filename, _ = QFileDialog.getSaveFileName(self, "Salvar Arquivo PDF", "exportacao_epi.pdf", "Arquivos PDF (*.pdf)")
+            if not filename:
+                return
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            margin = 50
+            y_position = height - margin
+            table_width = width - 2 * margin  # ~512 pt
+
+            headers = ["Nome", "CA", "Tamanho", "Marca", "Categoria", "Qnt", "Preço", "Fornecedor"]
+            col_widths = [90, 50, 50, 70, 70, 55, 50, 77]  # Soma exata 512 pt
+
+            def draw_header(c, y_pos, headers, col_widths, margin):
+                """Função auxiliar para desenhar header (evita duplicação de código)"""
+                header_y = y_pos
+                c.setFont("Times-Bold", 10)
+                x_pos = margin
+                for header, col_w in zip(headers, col_widths):
+                    lines = self.wrap_text(header, c, col_w - 3, "Times-Bold", 10)
+                    line_y = header_y
+                    for line in lines:
+                        c.drawString(x_pos + 1, line_y, line)
+                        line_y -= 11
+                    x_pos += col_w
+                return header_y - 16  # Altura header
+
+            # Título e data (primeira página)
+            c.setFont("Times-Bold", 14)
+            c.drawString(margin, y_position, "Relatório de Estoque de EPIs")
+            y_position -= 25
+            c.setFont("Times-Roman", 12)
+            c.drawString(margin, y_position, f"Data: {datetime.now().strftime('%d/%m/%Y')}")
+            y_position -= 60  # Aumentado para "descer" mais a tabela
+
+            # Header da tabela (primeira página)
+            y_position = draw_header(c, y_position, headers, col_widths, margin)
+            y_position -= 2  # Espaçamento após header (sem linha)
+
+            # Loop para dados
+            c.setFont("Times-Roman", 10)  # Regular para dados (sem bold/garbled)
+            line_height = 11
+            padding = 1
+            top_padding = 4  # Padding superior para texto mais baixo
+            bottom_padding = 4  # Padding inferior
+            for item in items:
+                # Quebra de página
+                if y_position < margin + 60:
+                    c.showPage()
+                    y_position = height - margin
+                    # Redesenhar título/data
+                    c.setFont("Times-Bold", 14)
+                    c.drawString(margin, y_position, "Relatório de Estoque de EPIs")
+                    y_position -= 25
+                    c.setFont("Times-Roman", 12)
+                    c.drawString(margin, y_position, f"Data: {datetime.now().strftime('%d/%m/%Y')}")
+                    y_position -= 60  # Aumentado para consistência
+                    # Redesenhar header
+                    y_position = draw_header(c, y_position, headers, col_widths, margin)
+                    y_position -= 2  # Espaçamento após header
+                    c.setFont("Times-Roman", 10)
+
+                row_y = y_position
+                max_lines = 1
+                cell_data = []  # Lista de (text, lines) por coluna
+
+                # Pass 1: Calcular linhas e max
+                for idx, value in enumerate(item):
+                    col_w = col_widths[idx]
+                    if idx == 6 and isinstance(value, (int, float)):  # Coluna Preço (índice 6)
+                        text = "{:.2f}".format(value)
+                    else:
+                        text = str(value or "N/A")
+                    lines = self.wrap_text(text, c, col_w - 2 * padding, "Times-Roman", 10)
+                    cell_data.append((text, lines))
+                    max_lines = max(max_lines, len(lines))
+
+                row_height = max_lines * line_height + top_padding + bottom_padding
+
+                # Pass 2: Desenhar, alinhado com padding superior
+                x_pos = margin
+                for idx, (text, lines) in enumerate(cell_data):
+                    col_w = col_widths[idx]
+                    line_y = row_y - top_padding  # Começa mais abaixo
+                    for line in lines:
+                        c.drawString(x_pos + padding, line_y, line)
+                        line_y -= line_height
+                    # Se menos linhas, não desenha nada extra (espaço vazio OK)
+                    x_pos += col_w
+
+                # Atualiza y_position para próxima row (sem linha horizontal)
+                y_position = row_y - row_height - 2  # Espaçamento fixo entre rows
+
+            c.save()
+            self.log_audit("export_pdf", f"Exportou dados para PDF: {filename}")
+            QMessageBox.information(self, "Sucesso", f"Dados exportados para {filename}")
+        except Exception as e:
+            self.handle_error("export_to_pdf", e, "Falha na exportação")
+
+    def logout(self):
+        """Log out the current user and show login dialog."""
+        if not self.confirm_action("Deseja sair do sistema?"):
+            return
+        self.log_audit("logout", "Usuário realizou logout")
+        login_dialog = LoginDialog(self.db_manager)
+        if login_dialog.exec_() == QDialog.Accepted:
+            self.current_user_id = login_dialog.user_id
+            self.current_user_level = login_dialog.user_level
+            self.refresh_all_data()
+            self.statusBar().showMessage(f"Usuário logado (Nível: {self.current_user_level})", 5000)
+        else:
+            self.close()
+
+    def refresh_all_data(self):
+        """Refresh all data in the application."""
+        self.load_items()
+        self.load_categories()
+        self.load_users()
+        self.load_colaboradores()
+        self.load_colaboradores_combo()
+        self.load_empresas()
+        self.load_empresas_list()
+        self.update_completers()
+        self.update_dashboard()
+        self.load_colab_filter()
+        self.load_delivered_colab()
+        self.statusBar().showMessage("Dados atualizados", 2000)
+
+    def load_items(self):
+        """Load EPI items into the items table."""
+        items = self.db_manager.execute_query(
+            "SELECT i.id, i.nome, i.ca, i.tamanho, i.marca, c.nome, i.quantidade, i.preco, i.estoque_minimo, i.fornecedor, i.data_adicao "
+            "FROM itens i LEFT JOIN categorias c ON i.categoria_id = c.id", fetch=True
+        )
+        self.items_table.setRowCount(len(items) if items else 0)
+        if items:
+            for row, item in enumerate(items):
+                for col, value in enumerate(item):
+                    self.items_table.setItem(row, col, QTableWidgetItem(str(value or "")))
+                    if col == 6 and item[6] <= item[8]:
+                        self.items_table.item(row, col).setBackground(QColor(255, 200, 200))
+
+    def load_categories(self):
+        """Load categories into relevant widgets."""
+        categories = self.db_manager.execute_query("SELECT id, nome FROM categorias", fetch=True)
+        for combo in [self.item_category, self.mov_category, self.category_filter]:
+            combo.clear()
+            if combo == self.category_filter:
+                combo.addItem("Todas as Categorias")
+            else:
+                combo.addItem("Selecionar Categoria", 0)
+        self.categories_list.clear()
+        if categories:
+            for cat_id, cat_name in categories:
+                self.item_category.addItem(cat_name, cat_id)
+                self.mov_category.addItem(cat_name, cat_id)
+                if self.category_filter != self.item_category:  # Evite duplicar no filtro
+                    self.category_filter.addItem(cat_name)
+                list_item = QListWidgetItem(cat_name)
+                list_item.setData(Qt.UserRole, cat_id)
+                self.categories_list.addItem(list_item)
+
+    def load_users(self):
+        """Load users into the users table."""
+        if not self.check_admin("visualizar usuários"):
+            return
+        users = self.db_manager.execute_query(
+            "SELECT u.id, u.nome_completo, u.matricula, u.cpf, u.level, e.nome "
+            "FROM usuarios u LEFT JOIN empresas e ON u.empresa_id = e.id", fetch=True
+        )
+        self.users_table.setRowCount(len(users) if users else 0)
+        if users:
+            for row, user in enumerate(users):
+                for col, value in enumerate(user):
+                    self.users_table.setItem(row, col, QTableWidgetItem(str(value or "")))
+
+    def load_colaboradores_combo(self):
+        """Load collaborators into the collaborator combo boxes."""
+        colaboradores = self.db_manager.execute_query(
+            "SELECT id, nome_completo, matricula FROM colaboradores", fetch=True
+        )
+        for combo in [self.colaborador_combo, self.return_colab_combo]:
+            combo.clear()
+            combo.addItem("Selecionar Colaborador", 0)
+            if colaboradores:
+                for id, nome, matricula in colaboradores:
+                    combo.addItem(f"{nome} ({matricula})", id)
+
+    def load_delivered_colab(self):
+        """Load collaborators into the delivered filter combo box."""
+        colaboradores = self.db_manager.execute_query(
+            "SELECT id, nome_completo, matricula FROM colaboradores", fetch=True
+        )
+        self.delivered_colab.clear()
+        self.delivered_colab.addItem("Todos", 0)
+        if colaboradores:
+            for id, nome, matricula in colaboradores:
+                self.delivered_colab.addItem(f"{nome} ({matricula})", id)
+
+    def load_colab_filter(self):
+        """Load collaborators into the report filter combo box."""
+        colaboradores = self.db_manager.execute_query(
+            "SELECT id, nome_completo, matricula FROM colaboradores", fetch=True
+        )
+        self.collab_filter.clear()
+        self.collab_filter.addItem("Selecionar Colaborador", 0)
+        if colaboradores:
+            for id, nome, matricula in colaboradores:
+                self.collab_filter.addItem(f"{nome} ({matricula})", id)
+
+    def load_empresas(self):
+        """Carregar empresas do banco no combo de colaboradores e usuários."""
+        empresas = self.db_manager.execute_query(
+            "SELECT id, nome FROM empresas ORDER BY nome", fetch=True
+        )
+
+        # Atualizar combo de colaboradores
+        self.colaborador_empresa.clear()
+        self.colaborador_empresa.addItem("Selecionar Empresa", 0)
+        if empresas:
+            for emp_id, nome in empresas:
+                self.colaborador_empresa.addItem(nome, emp_id)
+
+        # Atualizar combo de usuários
+        self.user_empresa.clear()
+        self.user_empresa.addItem("Selecionar Empresa", 0)
+        if empresas:
+            for emp_id, nome in empresas:
+                self.user_empresa.addItem(nome, emp_id)
+
+    
+        self.user_empresa.clear()
+        self.user_empresa.addItem("Selecionar Empresa", 0)
+        if empresas:
+            for emp_id, emp_nome in empresas:
+                self.user_empresa.addItem(emp_nome, emp_id)
+
+    def load_empresas_list(self):
+        """Load companies into the companies list."""
+        empresas = self.db_manager.execute_query(
+        "SELECT id, nome FROM empresas ORDER BY nome", fetch=True
+    )
+        self.empresas_list.clear()
+        if empresas:
+            for emp_id, emp_nome in empresas:
+                list_item = QListWidgetItem(emp_nome)
+                list_item.setData(Qt.UserRole, emp_id)
+                self.empresas_list.addItem(list_item)
+
+    def load_empresa_details(self, item):
+        """Load details of a selected company."""
+        emp_id = item.data(Qt.UserRole)
+        empresa = self.db_manager.execute_query(
+            "SELECT nome, cnpj, logadouro FROM empresas WHERE id=%s", (emp_id,), fetch=True
+        )
+        if empresa:
+            self.empresa_nome.setText(empresa[0][0])
+            self.empresa_cnpj.setText(empresa[0][1] or "")
+            self.empresa_logadouro.setText(empresa[0][2] or "")
+
+    def load_category_details(self, item):
+        """Load details of a selected category into the form."""
+        cat_id = item.data(Qt.UserRole)
+        category = self.db_manager.execute_query(
+            "SELECT nome, descricao FROM categorias WHERE id=%s", (cat_id,), fetch=True
+        )
+        if category:
+            self.category_name.setText(category[0][0])
+            self.category_description.setPlainText(category[0][1] or "")
+
+    def load_item_details(self):
+        """Load details of a selected item into the form."""
+        current_row = self.items_table.currentRow()
+        if current_row < 0:
+            return
+        item_id = self.items_table.item(current_row, 0).text()
+        item = self.db_manager.execute_query(
+            "SELECT nome, ca, tamanho, marca, categoria_id, quantidade, preco, estoque_minimo, fornecedor "
+            "FROM itens WHERE id=%s", (item_id,), fetch=True
+        )
+        if item:
+            self.item_name.setText(item[0][0])
+            self.item_ca.setText(item[0][1] or "")
+            self.item_size.setText(item[0][2] or "")
+            self.item_brand.setText(item[0][3] or "")
+            index = self.item_category.findData(item[0][4])
+            self.item_category.setCurrentIndex(index if index >= 0 else 0)
+            self.item_quantity.setValue(item[0][5] or 0)
+            self.item_price.setValue(item[0][6] or 0.0)
+            self.item_min_stock.setValue(item[0][7] or 0)
+            self.item_supplier.setText(item[0][8] or "")
+
+    def filter_items(self):
+        """Filter items table based on search input and category."""
+        search_text = self.search_input.text().lower()
+        category = self.category_filter.currentText()
+        items = self.db_manager.execute_query(
+            "SELECT i.id, i.nome, i.ca, i.tamanho, i.marca, c.nome, i.quantidade, i.preco, i.estoque_minimo, i.fornecedor, i.data_adicao "
+            "FROM itens i LEFT JOIN categorias c ON i.categoria_id = c.id", fetch=True
+        )
+        filtered_items = []
+        if items:
+            for item in items:
+                if (not search_text or search_text in item[1].lower() or (item[2] and search_text in item[2].lower())) and \
+                   (category == "Todas as Categorias" or item[5] == category):
+                    filtered_items.append(item)
+        
+        self.items_table.setRowCount(len(filtered_items))
+        for row, item in enumerate(filtered_items):
+            for col, value in enumerate(item):
+                self.items_table.setItem(row, col, QTableWidgetItem(str(value or "")))
+                if col == 6 and item[6] <= item[8]:
+                    self.items_table.item(row, col).setBackground(QColor(255, 200, 200))
+    #
+    def load_colaboradores(self):
+        """Load collaborators into the collaborators table."""
+        if not self.check_admin("visualizar colaboradores"):
+            return
+        colaboradores = self.db_manager.execute_query(
+            "SELECT c.id, c.nome_completo, c.matricula, c.cpf, e.nome "
+            "FROM colaboradores c LEFT JOIN empresas e ON c.empresa_id = e.id", fetch=True
+        )
+        self.colaboradores_table.setRowCount(len(colaboradores) if colaboradores else 0)
+        if colaboradores:
+            for row, colaborador in enumerate(colaboradores):
+                for col, value in enumerate(colaborador):
+                    self.colaboradores_table.setItem(row, col, QTableWidgetItem(str(value or "")))
+
+    def load_colaborador_details(self):
+        """Load details of a selected collaborator into the form."""
+        current_row = self.colaboradores_table.currentRow()
+        if current_row < 0:
+            return
+        colaborador_id = self.colaboradores_table.item(current_row, 0).text()
+        colaborador = self.db_manager.execute_query(
+            "SELECT nome_completo, matricula, cpf, empresa_id FROM colaboradores WHERE id=%s",
+            (colaborador_id,), fetch=True
+        )
+        if colaborador:
+            self.colaborador_nome_completo.setText(colaborador[0][0])
+            self.colaborador_matricula.setText(colaborador[0][1])
+            self.colaborador_cpf.setText(colaborador[0][2])
+            index = self.colaborador_empresa.findData(colaborador[0][3])
+            self.colaborador_empresa.setCurrentIndex(index if index >= 0 else 0)
+            self.colaborador_senha.clear()  # Senha não é exibida por segurança
+
+    def add_colaborador(self):
+        """Add a new collaborator to the system."""
+        if not self.check_admin("adicionar colaboradores"):
+            return
+
+        nome_completo = self.colaborador_nome_completo.text()
+        matricula = self.colaborador_matricula.text()
+        cpf = self.colaborador_cpf.text()
+        senha = self.colaborador_senha.text()
+        empresa_id = self.colaborador_empresa.currentData()
+
+        if not all([nome_completo, matricula, cpf, len(senha) == 4, empresa_id]):
+            QMessageBox.warning(self, "Erro", "Preencha todos os campos! Senha deve ter 4 dígitos e Empresa deve ser selecionada.")
+            return
+
+        if not self.confirm_action(f"Adicionar colaborador '{nome_completo}' (Matrícula: {matricula})?"):
+            return
+
+        try:
+            hashed_senha = hashlib.sha256(senha.encode()).hexdigest()
+            success = self.db_manager.execute_query(
+                "INSERT INTO colaboradores (nome_completo, matricula, cpf, senha, empresa_id) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (nome_completo, matricula, cpf, hashed_senha, empresa_id)
+            )
+            if success:
+                self.clear_colaborador_form()
+                self.load_colaboradores()
+                self.load_colaboradores_combo()
+                self.log_audit("add_colaborador", f"Adicionou colaborador '{nome_completo}' (Matrícula: {matricula}, Empresa ID: {empresa_id})")
+                QMessageBox.information(self, "Sucesso", f"Colaborador '{nome_completo}' adicionado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao adicionar colaborador. Verifique matrícula/CPF.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Matrícula ou CPF já existe.")
+        except Exception as e:
+            self.handle_error("add_colaborador", e)
+
+    def update_colaborador(self):
+        """Update a selected collaborator."""
+        if not self.check_admin("atualizar colaboradores"):
+            return
+
+        current_row = self.colaboradores_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Erro", "Selecione um colaborador para atualizar!")
+            return
+
+        colaborador_id = self.colaboradores_table.item(current_row, 0).text()
+        nome_completo = self.colaborador_nome_completo.text()
+        matricula = self.colaborador_matricula.text()
+        cpf = self.colaborador_cpf.text()
+        senha = self.colaborador_senha.text()
+        empresa_id = self.colaborador_empresa.currentData()
+
+        if not all([nome_completo, matricula, cpf, empresa_id]):
+            QMessageBox.warning(self, "Erro", "Preencha todos os campos obrigatórios!")
+            return
+
+        if not self.confirm_action(f"Atualizar colaborador '{nome_completo}' (ID: {colaborador_id})?"):
+            return
+
+        try:
+            query = "UPDATE colaboradores SET nome_completo=%s, matricula=%s, cpf=%s, empresa_id=%s"
+            params = [nome_completo, matricula, cpf, empresa_id]
+            if senha:
+                query += ", senha=%s"
+                params.append(hashlib.sha256(senha.encode()).hexdigest())
+            query += " WHERE id=%s"
+            params.append(colaborador_id)
+
+            success = self.db_manager.execute_query(query, params)
+            if success:
+                self.clear_colaborador_form()
+                self.load_colaboradores()
+                self.load_colaboradores_combo()
+                self.log_audit("update_colaborador", f"Atualizou colaborador '{nome_completo}' (ID: {colaborador_id})")
+                QMessageBox.information(self, "Sucesso", f"Colaborador '{nome_completo}' atualizado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao atualizar colaborador.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Matrícula ou CPF já existe.")
+        except Exception as e:
+            self.handle_error("update_colaborador", e)
+
+    def delete_colaborador(self):
+        """Delete a selected collaborator from the system."""
+        if not self.check_admin("deletar colaboradores"):
+            return
+
+        current_row = self.colaboradores_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Erro", "Selecione um colaborador para deletar!")
+            return
+
+        colaborador_id = self.colaboradores_table.item(current_row, 0).text()
+        nome_completo = self.colaboradores_table.item(current_row, 1).text()
+        matricula = self.colaboradores_table.item(current_row, 2).text()
+
+        if not self.confirm_action(f"Deletar colaborador '{nome_completo}' (Matrícula: {matricula})?"):
+            return
+
+        try:
+            success = self.db_manager.execute_query("DELETE FROM colaboradores WHERE id=%s", (colaborador_id,))
+            if success:
+                self.clear_colaborador_form()
+                self.load_colaboradores()
+                self.load_colaboradores_combo()
+                self.log_audit("delete_colaborador", f"Deletou colaborador '{nome_completo}' (Matrícula: {matricula})")
+                QMessageBox.information(self, "Sucesso", f"Colaborador '{nome_completo}' deletado com sucesso!")
+            else:
+                QMessageBox.critical(self, "Erro", "Falha ao deletar colaborador.")
+        except mysql.connector.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", "Colaborador vinculado a movimentações. Delete as movimentações primeiro.")
+        except Exception as e:
+            self.handle_error("delete_colaborador", e)
+
+    def clear_colaborador_form(self):
+        """Clear the collaborator form fields."""
+        for widget in [self.colaborador_nome_completo, self.colaborador_matricula, self.colaborador_cpf, self.colaborador_senha]:
+            widget.clear()
+        self.colaborador_empresa.setCurrentIndex(0)
+    #
+    def update_completers(self):
+        """Update autocompleters for item name and CA in withdrawal tab."""
+        items = self.db_manager.execute_query("SELECT nome, ca, tamanho FROM itens", fetch=True)
+        names = [item[0] for item in items if item[0]]
+        cas = [item[1] for item in items if item[1]]
+        sizes = list(set(item[2] for item in items if item[2]))
+        
+        self.mov_name.clear()
+        self.mov_size.clear()
+        self.mov_size.addItems(["Selecionar Tamanho"] + sorted(sizes))
+        completer = QCompleter(names + cas, self.mov_name)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.mov_name.setCompleter(completer)
+
+    def on_colaborador_selected(self):
+        """Handle collaborator selection for withdrawal."""
+        self.pending_withdrawals = []
+        self.pending_table.setRowCount(0)
+        self.mov_name.clear()
+        self.mov_ca.clear()
+        self.mov_size.setCurrentIndex(0)
+        self.mov_category.setCurrentIndex(0)
+        self.mov_withdraw_qty.setValue(1)
+        self.mov_valid_days.setValue(180)
+
+    def on_mov_name_changed(self, text):
+        """Populate sizes based on the item name or CA."""
+        self.mov_size.clear()
+        self.mov_size.addItem("Selecionar Tamanho")
+        if text:
+            sizes = self.db_manager.execute_query(
+                "SELECT DISTINCT tamanho FROM itens WHERE (nome = %s OR ca = %s) AND quantidade > 0 AND tamanho IS NOT NULL ORDER BY tamanho",
+                (text, text), fetch=True
+            )
+            if sizes:
+                for size in sizes:
+                    self.mov_size.addItem(size[0])
+
+    def on_mov_size_selected(self):
+        """Update item details based on selected size."""
+        size = self.mov_size.currentText()
+        if size == "Selecionar Tamanho":
+            self.mov_ca.clear()
+            self.mov_category.setCurrentIndex(0)
+            return
+        
+        item_name = self.mov_name.text()
+        item = self.db_manager.execute_query(
+            "SELECT i.ca, c.nome FROM itens i LEFT JOIN categorias c ON i.categoria_id = c.id "
+            "WHERE (i.nome=%s OR i.ca=%s) AND i.tamanho=%s", (item_name, item_name, size), fetch=True
+        )
+        if item:
+            self.mov_ca.setText(item[0][0] or "")
+            index = self.mov_category.findText(item[0][1] or "")
+            self.mov_category.setCurrentIndex(index if index >= 0 else 0)
+
+    def add_to_pending(self):
+        """Add an item to the pending withdrawals list."""
+        if self.current_user_level not in [2, 3]:
+            QMessageBox.warning(self, "Erro", "Apenas almoxarifes ou administradores podem registrar retiradas!")
+            return
+
+        colaborador_id = self.colaborador_combo.currentData()
+        item_name = self.mov_name.text()
+        size = self.mov_size.currentText() if self.mov_size.currentText() != "Selecionar Tamanho" else None
+        qty = self.mov_withdraw_qty.value()
+        valid_days = self.mov_valid_days.value()
+
+        if not colaborador_id or not item_name:
+            QMessageBox.warning(self, "Erro", "Selecione um colaborador e digite o nome ou CA do EPI!")
+            return
+
+        item = self.db_manager.execute_query(
+            "SELECT id, nome, ca, tamanho, quantidade FROM itens WHERE (nome=%s OR ca=%s)"
+            + (" AND tamanho=%s" if size else ""), 
+            (item_name, item_name, size) if size else (item_name, item_name), fetch=True
+        )
+        if not item:
+            QMessageBox.warning(self, "Erro", "EPI não encontrado!")
+            return
+
+        item_id, name, ca, item_size, available_qty = item[0]
+        if qty > available_qty:
+            QMessageBox.warning(self, "Erro", f"Quantidade solicitada ({qty}) excede o estoque disponível ({available_qty})!")
+            return
+
+        if not self.confirm_action(f"Adicionar retirada de {qty} '{name}' (Tamanho: {item_size or 'N/A'})?"):
+            return
+
+        self.pending_withdrawals.append((item_id, name, ca, item_size, qty, valid_days))
+        self.update_pending_table()
+        self.log_audit("add_pending_withdrawal", f"Adicionou retirada pendente: {qty} '{name}' (Tamanho: {item_size or 'N/A'})")
+
+    def update_pending_table(self):
+        """Update the pending withdrawals table."""
+        self.pending_table.setRowCount(len(self.pending_withdrawals))
+        for row, (item_id, name, ca, size, qty, _) in enumerate(self.pending_withdrawals):
+            self.pending_table.setItem(row, 0, QTableWidgetItem(name))
+            self.pending_table.setItem(row, 1, QTableWidgetItem(ca or ""))
+            self.pending_table.setItem(row, 2, QTableWidgetItem(size or ""))
+            self.pending_table.setItem(row, 3, QTableWidgetItem(str(qty)))
+            remove_btn = QPushButton("Remover")
+            remove_btn.setProperty("delete", True)
+            remove_btn.clicked.connect(lambda _, r=row: self.remove_pending(r))
+            self.pending_table.setCellWidget(row, 4, remove_btn)
+
+    def remove_pending(self, row):
+        """Remove an item from the pending withdrawals list."""
+        if not self.confirm_action(f"Remover retirada pendente: {self.pending_withdrawals[row][1]}?"):
+            return
+        self.pending_withdrawals.pop(row)
+        self.update_pending_table()
+        self.log_audit("remove_pending_withdrawal", f"Removeu retirada pendente: {row}")
+
+    def confirm_pending(self):
+        """Confirm all pending withdrawals and update the database."""
+        if not self.pending_withdrawals:
+            QMessageBox.warning(self, "Erro", "Nenhuma retirada pendente para confirmar!")
+            return
+
+        colaborador_id = self.colaborador_combo.currentData()
+        password, ok = QInputDialog.getText(self, "Verificação de Senha", "Digite a senha do colaborador:", QLineEdit.Password)
+        if not ok:
+            return
+
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        result = self.db_manager.execute_query(
+            "SELECT id FROM colaboradores WHERE id=%s AND senha=%s", (colaborador_id, hashed_password), fetch=True
+        )
+        if not result:
+            QMessageBox.warning(self, "Erro", "Senha incorreta!")
+            return
+
+        if not self.confirm_action("Confirmar todas as retiradas pendentes?"):
+            return
+
+        try:
+            for item_id, name, ca, size, qty, valid_days in self.pending_withdrawals:
+                success = self.db_manager.execute_query(
+                    "UPDATE itens SET quantidade = quantidade - %s WHERE id=%s", (qty, item_id)
+                )
+                if success:
+                    expiration = (datetime.now() + timedelta(days=valid_days)).strftime("%Y-%m-%d")
+                    self.db_manager.execute_query(
+                        "INSERT INTO movimentacoes (item_id, alteracao_quantidade, data, motivo, colaborador_id, expiration_date) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (item_id, -qty, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                        "Retirada por colaborador", colaborador_id, expiration)
+                    )
+                    self.log_audit("confirm_withdrawal", 
+                                f"Confirmou retirada: {qty} '{name}' (Tamanho: {size or 'N/A'})")
+                else:
+                    QMessageBox.critical(self, "Erro", f"Falha ao confirmar retirada de '{name}'!")
+                    return
+
+            self.pending_withdrawals = []
+            self.pending_table.setRowCount(0)
+            self.load_items()
+            self.update_completers()
+            self.update_dashboard()
+            QMessageBox.information(self, "Sucesso", "Todas as retiradas foram confirmadas com sucesso!")
+        except Exception as e:
+            self.handle_error("confirm_pending", e, "Falha ao confirmar retiradas")
+
+    def on_return_colab_selected(self):
+        """Load withdrawn items for the selected collaborator in return tab."""
+        colab_id = self.return_colab_combo.currentData()
+        if not colab_id:
+            self.withdrawn_table.setRowCount(0)
+            return
+
+        query = """
+            SELECT i.id, i.nome, i.ca, i.tamanho, -SUM(m.alteracao_quantidade) as qty_owed
+            FROM movimentacoes m JOIN itens i ON m.item_id = i.id
+            WHERE m.colaborador_id = %s GROUP BY i.id HAVING SUM(m.alteracao_quantidade) < 0
+        """
+        withdrawn = self.db_manager.execute_query(query, (colab_id,), fetch=True) or []
+        self.withdrawn_table.setRowCount(len(withdrawn))
+        for row, (item_id, name, ca, size, qty_owed) in enumerate(withdrawn):
+            self.withdrawn_table.setItem(row, 0, QTableWidgetItem(str(item_id)))
+            self.withdrawn_table.setItem(row, 1, QTableWidgetItem(name))
+            self.withdrawn_table.setItem(row, 2, QTableWidgetItem(ca or ""))
+            self.withdrawn_table.setItem(row, 3, QTableWidgetItem(size or ""))
+            self.withdrawn_table.setItem(row, 4, QTableWidgetItem(str(qty_owed)))
+            qty_return = QSpinBox(minimum=0, maximum=qty_owed)
+            self.withdrawn_table.setCellWidget(row, 5, qty_return)
+
+        self.pending_returns = []
+        self.return_pending_table.setRowCount(0)
+
+    def add_returns_to_pending(self):
+        """Add selected returns to pending list."""
+        for row in range(self.withdrawn_table.rowCount()):
+            qty_return = self.withdrawn_table.cellWidget(row, 5).value()
+            if qty_return > 0:
+                item_id = int(self.withdrawn_table.item(row, 0).text())
+                name = self.withdrawn_table.item(row, 1).text()
+                ca = self.withdrawn_table.item(row, 2).text()
+                size = self.withdrawn_table.item(row, 3).text()
+                self.pending_returns.append((item_id, name, ca, size, qty_return))
+
+        self.update_return_pending_table()
+
+    def update_return_pending_table(self):
+        """Update the pending returns table."""
+        self.return_pending_table.setRowCount(len(self.pending_returns))
+        for row, (item_id, name, ca, size, qty) in enumerate(self.pending_returns):
+            self.return_pending_table.setItem(row, 0, QTableWidgetItem(name))
+            self.return_pending_table.setItem(row, 1, QTableWidgetItem(ca or ""))
+            self.return_pending_table.setItem(row, 2, QTableWidgetItem(size or ""))
+            self.return_pending_table.setItem(row, 3, QTableWidgetItem(str(qty)))
+            remove_btn = QPushButton("Remover")
+            remove_btn.setProperty("delete", True)
+            remove_btn.clicked.connect(lambda _, r=row: self.remove_return_pending(r))
+            self.return_pending_table.setCellWidget(row, 4, remove_btn)
+
+    def remove_return_pending(self, row):
+        """Remove an item from the pending returns list."""
+        self.pending_returns.pop(row)
+        self.update_return_pending_table()
+
+    def confirm_returns(self):
+        """Confirm all pending returns, mark items for disposal, and update the database."""
+        if not self.pending_returns:
+            QMessageBox.warning(self, "Erro", "Nenhuma devolução pendente para confirmar!")
+            return
+
+        colaborador_id = self.return_colab_combo.currentData()
+        password, ok = QInputDialog.getText(self, "Verificação de Senha", "Digite a senha do colaborador:", QLineEdit.Password)
+        if not ok:
+            return
+
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        result = self.db_manager.execute_query(
+            "SELECT id FROM colaboradores WHERE id=%s AND senha=%s", (colaborador_id, hashed_password), fetch=True
+        )
+        if not result:
+            QMessageBox.warning(self, "Erro", "Senha incorreta!")
+            return
+
+        if not self.confirm_action("Confirmar todas as devoluções pendentes? Os itens devolvidos serão marcados para descarte."):
+            return
+
+        try:
+            for item_id, name, ca, size, qty in self.pending_returns:
+                success = self.db_manager.execute_query(
+                    "UPDATE itens SET quantidade_descarte = quantidade_descarte + %s WHERE id=%s", (qty, item_id)
+                )
+                if success:
+                    self.db_manager.execute_query(
+                        "INSERT INTO movimentacoes (item_id, alteracao_quantidade, data, motivo, colaborador_id, expiration_date) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (item_id, qty, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                        "Devolução para descarte", colaborador_id, None)
+                    )
+                    self.log_audit("confirm_return", 
+                                f"Confirmou devolução para descarte: {qty} '{name}' (Tamanho: {size or 'N/A'})")
+                else:
+                    QMessageBox.critical(self, "Erro", f"Falha ao confirmar devolução de '{name}'!")
+                    return
+
+            self.pending_returns = []
+            self.return_pending_table.setRowCount(0)
+            self.on_return_colab_selected()
+            self.load_items()
+            self.update_completers()
+            self.update_dashboard()
+            QMessageBox.information(self, "Sucesso", "Todas as devoluções foram confirmadas para descarte com sucesso!")
+        except Exception as e:
+            self.handle_error("confirm_returns", e, "Falha ao confirmar devoluções para descarte")
+
+    def load_delivered(self):
+        """Load delivered EPIs based on filters."""
+        colab_id = self.delivered_colab.currentData()
+        start_del = self.delivered_start_del.text() or None
+        end_del = self.delivered_end_del.text() or None
+        start_exp = self.delivered_start_exp.text() or None
+        end_exp = self.delivered_end_exp.text() or None
+
+        query = """
+            SELECT c.nome_completo, i.nome, i.ca, i.tamanho, -m.alteracao_quantidade, m.data, m.expiration_date
+            FROM movimentacoes m
+            JOIN colaboradores c ON m.colaborador_id = c.id
+            JOIN itens i ON m.item_id = i.id
+            WHERE m.alteracao_quantidade < 0
+        """
+        params = []
+        if colab_id and colab_id != 0:
+            query += " AND m.colaborador_id = %s"
+            params.append(colab_id)
+        if start_del:
+            query += " AND m.data >= %s"
+            params.append(start_del)
+        if end_del:
+            query += " AND m.data <= %s"
+            params.append(end_del)
+        if start_exp:
+            query += " AND m.expiration_date >= %s"
+            params.append(start_exp)
+        if end_exp:
+            query += " AND m.expiration_date <= %s"
+            params.append(end_exp)
+        query += " ORDER BY m.data DESC"
+
+        delivered = self.db_manager.execute_query(query, params, fetch=True) or []
+        self.delivered_table.setRowCount(len(delivered))
+        for row, (colab, name, ca, size, qty, date_del, date_exp) in enumerate(delivered):
+            self.delivered_table.setItem(row, 0, QTableWidgetItem(colab))
+            self.delivered_table.setItem(row, 1, QTableWidgetItem(name))
+            self.delivered_table.setItem(row, 2, QTableWidgetItem(ca or ""))
+            self.delivered_table.setItem(row, 3, QTableWidgetItem(size or ""))
+            self.delivered_table.setItem(row, 4, QTableWidgetItem(str(qty)))
+            self.delivered_table.setItem(row, 5, QTableWidgetItem(str(date_del)))
+            self.delivered_table.setItem(row, 6, QTableWidgetItem(date_exp.strftime("%Y-%m-%d") if date_exp else ""))
+            if date_exp:
+                if date_exp <= datetime.now().date() + timedelta(days=7):
+                    for col in range(7):
+                        self.delivered_table.item(row, col).setBackground(QColor(255, 0, 0))
+
+    def get_date_range(self):
+        """Get the date range for reports based on time filter."""
+        time_filter = self.time_filter.currentText()
+        now = datetime.now()
+        ranges = {
+            "1 Dia": now - timedelta(days=1),
+            "1 Semana": now - timedelta(weeks=1),
+            "15 Dias": now - timedelta(days=15),
+            "1 Mês": now - timedelta(days=30),
+            "3 Meses": now - timedelta(days=90),
+            "6 Meses": now - timedelta(days=180),
+            "1 Ano": now - timedelta(days=365),
+            "5 Anos": now - timedelta(days=1825),
+            "10 Anos": now - timedelta(days=3650)
+        }
+        return ranges.get(time_filter, None).strftime("%Y-%m-%d") if time_filter != "Todos os Períodos" else None
+
+    def confirm_action(self, message):
+        """Show a confirmation dialog and return the result."""
+        return QMessageBox.question(self, "Confirmação", message, 
+                                  QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+
+    def log_audit(self, action, details):
+        """Log an action to the audit_logs table."""
+        self.db_manager.execute_query(
+            "INSERT INTO audit_logs (user_id, action, details, timestamp) VALUES (%s, %s, %s, %s)",
+            (self.current_user_id, action, details, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+
+    def handle_error(self, action, error, message="Ocorreu um erro inesperado"):
+        """Handle and log errors with a user-friendly message."""
+        print(f"Error in {action}: {error}")
+        self.log_audit(f"error_{action}", str(error))
+        QMessageBox.critical(self, "Erro", f"{message}: {str(error)}")
+
+    def clear_user_form(self):
+        """Clear the user form fields."""
+        for widget in [self.user_nome_completo, self.user_matricula, self.user_cpf, self.user_senha]:
+            widget.clear()
+        self.user_level.setCurrentIndex(0)
+        self.user_empresa.setCurrentIndex(0)
+
+    def clear_item_form(self):
+        """Clear the item form fields."""
+        for widget in [self.item_name, self.item_ca, self.item_size, self.item_brand, self.item_supplier]:
+            widget.clear()
+        self.item_category.setCurrentIndex(0)
+        self.item_quantity.setValue(0)
+        self.item_price.setValue(0.0)
+        self.item_min_stock.setValue(0)
+
+    def clear_category_form(self):
+        """Clear the category form fields."""
+        self.category_name.clear()
+        self.category_description.clear()
+
+    def clear_empresa_form(self):
+        """Clear the company form fields."""
+        for widget in [self.empresa_nome, self.empresa_cnpj, self.empresa_logadouro]:
+            widget.clear()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = EPIApp()
+    window.show()
+    sys.exit(app.exec_())
