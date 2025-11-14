@@ -30,7 +30,7 @@ licenses_db → banco para controle de licenças
 Atenção: O sistema cria automaticamente o banco epi1 se não existir.
 3. Pacotes Python Necessários
 Execute o comando abaixo para instalar todas as dependências:
-bashpip install PyQt5 pandas openpyxl matplotlib reportlab mysql-connector-python boto3
+pip install PyQt5 pandas openpyxl matplotlib reportlab mysql-connector-python boto3
 O sistema verifica e instala automaticamente as dependências na primeira execução (se não estiverem presentes).
 
 Configuração Inicial
@@ -39,11 +39,11 @@ Configuração Inicial
 Abra o MySQL (via terminal ou cliente como MySQL Workbench)
 Crie o banco de licenças:
 
-sqlCREATE DATABASE licenses_db;
+CREATE DATABASE licenses_db;
 
 Crie a tabela de licenças:
 
-sqlUSE licenses_db;
+USE licenses_db;
 CREATE TABLE licenses (
     id INT AUTO_INCREMENT PRIMARY KEY,
     license_key VARCHAR(50) UNIQUE,
@@ -55,7 +55,7 @@ CREATE TABLE licenses (
 
 Insira uma chave de licença válida (exemplo):
 
-sqlINSERT INTO licenses (license_key, level, expiration_date, max_companies, max_users)
+INSERT INTO licenses (license_key, level, expiration_date, max_companies, max_users)
 VALUES ('your-license-key-12345', 3, '2026-12-31', 10, 50);
 Altere your-license-key-12345 no código se necessário.
 
